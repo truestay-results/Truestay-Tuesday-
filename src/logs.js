@@ -705,52 +705,7 @@ export async function handleLogsApp(req, env, url, path, ctx) {
 }
 
 // ---------- share button routes: /api/logs/* (the iPhone Shortcut, key in ?k=) ----------
-// TEMPORARY while tuning the reading: runs a model on one of the bundled test screenshots. Remove once tuned.
-const MC_VARIANTS = {
-  g0: ["@cf/google/gemma-4-26b-a4b-it", { max_tokens: 900, temperature: 0, chat_template_kwargs: { enable_thinking: false } }],
-  g1: ["@cf/google/gemma-4-26b-a4b-it", { max_tokens: 900, temperature: 0 }],
-  g2: ["@cf/google/gemma-4-26b-a4b-it", { max_completion_tokens: 900, temperature: 0, reasoning_effort: "none" }],
-  g3: ["@cf/google/gemma-4-26b-a4b-it", {}],
-  l0: ["@cf/meta/llama-4-scout-17b-16e-instruct", { max_tokens: 900, temperature: 0 }],
-  q0: ["@cf/qwen/qwen3.8-27b", { max_completion_tokens: 1500, temperature: 0, reasoning_effort: "low" }],
-  q1: ["@cf/qwen/qwen3.8-27b", { max_tokens: 1500, temperature: 0 }],
-  k0: ["@cf/moonshotai/kimi-k2.6", { max_completion_tokens: 900, temperature: 0, reasoning_effort: "none" }],
-  m0: ["@cf/moondream/moondream3.1-9B-A2B", { max_tokens: 900, temperature: 0 }],
-  s0: ["@cf/mistralai/mistral-small-3.1-24b-instruct", { max_tokens: 900, temperature: 0 }],
-};
-async function modelCheck(env, url, img, variant) {
-  const res = await env.ASSETS.fetch(new Request(new URL(`/logs/_test/${img}`, url)));
-  if (!res.ok) return plain("no img", 404);
-  const u8 = new Uint8Array(await res.arrayBuffer());
-  const dataUrl = `data:image/jpeg;base64,${toB64(u8)}`;
-  const t0 = Date.now();
-  if (variant === "prod") {
-    try {
-      const out = await askModels(env, dataUrl);
-      return json({ ms: Date.now() - t0, model: out.model, cleaned: cleanReading(out.reading), raw: out.raw.slice(0, 1200) });
-    } catch (e) {
-      return json({ ms: Date.now() - t0, error: String((e && e.message) || e).slice(0, 800) });
-    }
-  }
-  const v = MC_VARIANTS[variant];
-  if (!v) return plain("unknown variant", 400);
-  const [model, extra] = v;
-  const content = [{ type: "text", text: PROMPT }, { type: "image_url", image_url: { url: dataUrl } }];
-  const input = { messages: [{ role: "system", content: SYSTEM }, { role: "user", content }], ...extra };
-  try {
-    const out = await env.AI.run(model, input);
-    const text = textOf(out);
-    const parsed = parseJSONish(text);
-    return json({ ms: Date.now() - t0, model, text: text.slice(0, 1500), cleaned: parsed ? cleanReading(parsed) : null, usage: (out && out.usage) || null, keys: Object.keys(out || {}) });
-  } catch (e) {
-    return json({ ms: Date.now() - t0, model, error: String((e && e.message) || e).slice(0, 800) });
-  }
-}
-
 export async function handleLogsShare(req, env, url, ctx) {
-  // /api/logs/_mc/<token>/<img>/<variant>  (path only, no query string)
-  const mc = url.pathname.match(/^\/api\/logs\/_mc\/([^/]+)\/([a-f]\.jpg)\/([a-z0-9]+)$/);
-  if (mc && mc[1] === "sbPUd7RLFKxZ9NN9UEHhYq12") return modelCheck(env, url, mc[2], mc[3]);
   try {
     const db = env.LOGS_DB;
     if (!db) return plain("The logs database isn't connected.", 500);
