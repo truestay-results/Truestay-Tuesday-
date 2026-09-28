@@ -1,0 +1,17 @@
+{
+  "name": "TrueStay Pay",
+  "short_name": "TS Pay",
+  "description": "Client payments and revenue for TrueStay Results",
+  "id": "/pay/",
+  "start_url": "/pay/",
+  "scope": "/pay/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#E3E8E5",
+  "theme_color": "#E3E8E5",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

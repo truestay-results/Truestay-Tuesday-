@@ -13,5 +13,13 @@
     { "pattern": "truestaytuesday.com", "custom_domain": true },
     { "pattern": "www.truestaytuesday.com", "custom_domain": true }
   ],
+  "d1_databases": [
+    {
+      "binding": "PAY_DB",
+      "database_name": "truestay-pay",
+      "database_id": "4073abea-7d59-4667-aa50-7102e2ed983b",
+      "migrations_dir": "migrations"
+    }
+  ],
   "observability": { "enabled": true }
 }

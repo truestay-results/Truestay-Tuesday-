@@ -2,6 +2,8 @@
 // Static pages live in /public (each tool gets its own folder, e.g. /public/checkin/).
 // Anything under /api/* runs here, so tools can have real backends (D1, KV, etc).
 
+import { handlePay } from "./pay.js";
+
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
     status,
@@ -14,6 +16,10 @@ export default {
 
     if (url.pathname === "/api/health") {
       return json({ ok: true, service: "truestay-tuesday", time: new Date().toISOString() });
+    }
+
+    if (url.pathname === "/api/pay" || url.pathname.startsWith("/api/pay/")) {
+      return handlePay(request, env, url);
     }
 
     if (url.pathname.startsWith("/api/")) {
