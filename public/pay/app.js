@@ -1235,7 +1235,7 @@
       got: sum(S.data.payments.filter((p) => p.paid_date && mKey(p.paid_date) === k)),
       future: k > cur,
     }));
-    const tMax = Math.max(1, ...trend.map((t) => Math.max(t.due, t.got)));
+    const tMax = Math.max(10000, ...trend.map((t) => Math.max(t.due, t.got))); // floor of £100 so an empty chart reads £100 / £50 / £0, not £0.0.5
     const niceMax = niceCeil(tMax);
     const sel = trend.find((t) => t.k === (S.trendSel || cur)) || trend[0];
 
@@ -1636,7 +1636,7 @@
         ${
           isEdit
             ? `<div class="status-card ${st}"><div class="l"><b>${STL[st]}</b><small>${
-                st === "paid" ? `Received ${fmtLong(p.paid_date)}` : st === "overdue" ? `${daysBetween(p.due_date, today)} days past due` : `Due ${fmtLong(p.due_date)}`
+                st === "paid" ? `Received ${fmtLong(p.paid_date)}` : st === "overdue" ? `${plural(daysBetween(p.due_date, today), "day")} past due` : `Due ${fmtLong(p.due_date)}`
               }${p.chase_count && !p.paid_date ? ` · chased ${p.chase_count}× (last ${ago(p.chased_at)})` : ""}</small></div><span class="switch"><input type="checkbox" id="p-paid" ${p.paid_date ? "checked" : ""} aria-label="Paid"><i></i></span></div>
                <div class="field" id="p-paid-f" ${p.paid_date ? "" : "hidden"}><label for="p-paiddate">Date received</label><input id="p-paiddate" type="date" value="${p.paid_date || today}"></div>
                ${!p.paid_date ? `<button type="button" class="btn ghost" data-chase="${p.id}">${ic("chat")} Chase this payment</button>` : ""}`
@@ -1837,7 +1837,7 @@
                      <a class="btn sm ghost" data-log-chase="${p.id}" href="sms:${phone.replace(/[^\d+]/g, "")}${isIOS() ? "&" : "?"}body=${encodeURIComponent(msg)}">${ic("phone")} Text</a>`
                   : `<button class="btn sm ghost" data-action="edit-client" data-client="${c?.id}">${ic("plus")} Add their number</button>`
               }
-              ${canShare ? `<button class="btn sm ghost" data-share-chase="${p.id}">${ic("share")}</button>` : `<button class="btn sm ghost" data-copy-chase="${p.id}">${ic("copy")}</button>`}
+              ${canShare ? `<button class="btn sm ghost" data-share-chase="${p.id}" aria-label="Share message">${ic("share")}</button>` : `<button class="btn sm ghost" data-copy-chase="${p.id}" aria-label="Copy message">${ic("copy")}</button>`}
             </div>
           </div>`;
         })

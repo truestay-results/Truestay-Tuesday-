@@ -21,3 +21,4 @@ Private client payment and revenue tracker. Phone-first web app: add it to your 
 - Morning nudge: hourly cron (`triggers.crons` in `wrangler.jsonc`) sends one Web Push a day at the chosen UK hour; VAPID keys live in `pay_meta`
 - Sign-in: email and password once per device (sessions last a year), optional Face ID via passkeys
 - Money stored in pence; tracking starts 28 September 2026
+- Look, colours, sizes and the tap-area rules: see [`DESIGN.md`](DESIGN.md). Read it before changing how `/pay` looks
