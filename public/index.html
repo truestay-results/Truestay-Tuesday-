@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en-GB">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TrueStay Tuesday</title>
+<meta name="description" content="Free, no nonsense fitness tools from TrueStay Results, Leeds. New stuff every Tuesday.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;800&family=Inter:wght@400;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --orange: #C45A1E;
+    --paper: #F2EDE4;
+    --ink: #1A1A1A;
+    --muted: #6b655c;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body {
+    background: var(--ink);
+    color: var(--paper);
+    font-family: Inter, system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  .wrap { width: 100%; max-width: 720px; margin: 0 auto; padding: 0 20px; }
+  header { padding: 56px 0 32px; }
+  .kicker {
+    font-family: "Barlow Condensed", sans-serif;
+    font-weight: 600;
+    letter-spacing: .18em;
+    text-transform: uppercase;
+    color: var(--orange);
+    font-size: 15px;
+  }
+  h1 {
+    font-family: "Barlow Condensed", sans-serif;
+    font-weight: 800;
+    text-transform: uppercase;
+    font-size: clamp(56px, 15vw, 112px);
+    line-height: .88;
+    margin: 12px 0 20px;
+  }
+  h1 span { color: var(--orange); }
+  .lede { font-size: 18px; line-height: 1.5; max-width: 32ch; opacity: .9; }
+  .tools { display: grid; gap: 12px; padding: 24px 0 64px; }
+  .tool {
+    display: flex; justify-content: space-between; align-items: center; gap: 16px;
+    background: var(--paper); color: var(--ink);
+    padding: 20px 22px; border-radius: 6px; text-decoration: none;
+  }
+  .tool h2 {
+    font-family: "Barlow Condensed", sans-serif; font-weight: 800;
+    text-transform: uppercase; font-size: 28px; line-height: 1;
+  }
+  .tool p { color: var(--muted); margin-top: 6px; font-size: 15px; }
+  .tag {
+    flex-shrink: 0; font-family: "Barlow Condensed", sans-serif; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .08em; font-size: 13px;
+    background: var(--ink); color: var(--paper); padding: 6px 10px; border-radius: 3px;
+  }
+  footer { margin-top: auto; padding: 24px 0 32px; border-top: 1px solid #333; font-size: 14px; color: #9a948a; }
+  footer a { color: var(--paper); }
+</style>
+</head>
+<body>
+  <header class="wrap">
+    <div class="kicker">TrueStay Results · Leeds</div>
+    <h1>TrueStay<br><span>Tuesday</span></h1>
+    <p class="lede">Free tools with no fluff and no bullshit. New stuff drops every Tuesday.</p>
+  </header>
+
+  <main class="wrap tools">
+    <div class="tool">
+      <div><h2>Tuesday Check In</h2><p>Five questions. One honest verdict. One thing to fix this week.</p></div>
+      <span class="tag">Soon</span>
+    </div>
+    <div class="tool">
+      <div><h2>What's Stopping You</h2><p>Find your real bottleneck. Brace yourself.</p></div>
+      <span class="tag">Soon</span>
+    </div>
+    <div class="tool">
+      <div><h2>Wheel of Pain</h2><p>Spin it. Do it. No complaining.</p></div>
+      <span class="tag">Soon</span>
+    </div>
+  </main>
+
+  <footer class="wrap">Coached in person in Meanwood, Leeds by TrueStay Results.</footer>
+</body>
+</html>
