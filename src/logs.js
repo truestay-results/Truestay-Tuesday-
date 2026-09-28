@@ -291,8 +291,7 @@ const PROMPT = `Read this screenshot and fill in this JSON. Use null for anythin
   "steps": "the day's step count if shown",
   "exercise_kcal": "calories burned by exercise or activity if shown",
   "extras": [{"label": "Water", "value": "2.1 L"}],
-  "partial": "true if the screenshot is cut off before the day's totals",
-  "note": "one short sentence a coach would want to know, e.g. Only breakfast and lunch logged. Empty string if nothing"
+  "note": "empty string, unless something on the screen stands out for a coach, e.g. a meal section that's empty or a warning from the app. Don't mention parts that are just off the screen"
 }
 For extras give up to 4 other daily numbers worth a coach seeing, such as water, body weight, fibre, sugar, distance or sleep. Numbers as plain numbers without units, except inside extras values.`;
 
@@ -389,7 +388,7 @@ export function cleanReading(o) {
     }
   }
   const ex = toNum(o.exercise_kcal, 1, 6000);
-  if (ex != null && !extras.some((x) => /exercise|burn|active/i.test(x.label))) extras.unshift({ label: "Exercise", value: fmtKcal(ex) });
+  if (ex != null && !extras.some((x) => /kcal|cal\b/i.test(x.value))) extras.unshift({ label: "Burned", value: fmtKcal(ex) });
   const r = {
     kind,
     app: s(o.app, 40),
@@ -403,7 +402,7 @@ export function cleanReading(o) {
     fat_g: toNum(o.fat_g, 0, 600, 1),
     steps: toNum(o.steps, 0, 150000),
     extras: extras.slice(0, 4),
-    partial: o.partial === true || o.partial === "true",
+    partial: false,
     note: s(o.note, 160) || "",
   };
   // a steps screen with no food numbers shouldn't claim food, and vice versa
@@ -411,6 +410,7 @@ export function cleanReading(o) {
   if (r.kind === "food_steps" && !hasFood) r.kind = r.steps != null ? "steps" : "other";
   if (r.kind === "food_steps" && r.steps == null) r.kind = "food";
   if (r.kind === "steps" && hasFood && r.steps != null) r.kind = "food_steps";
+  r.partial = (r.kind === "food" || r.kind === "food_steps") && r.calories == null;
   return r;
 }
 
