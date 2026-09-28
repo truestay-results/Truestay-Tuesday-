@@ -6,7 +6,10 @@
 //    whose SHA-256 is stored in pay_meta.setup_code_hash.
 //  - Sessions last a year and slide forward with use (HttpOnly cookie).
 //  - Optional Face ID / passkey (WebAuthn). When set up, the app locks after
-//    `lock_minutes` idle and unlocks with Face ID; password always works too.
+//    `lock_minutes` away and unlocks with Face ID; password always works too.
+//    The app itself shows the lock screen when you come back to it; the server
+//    backs that up by locking a session that has gone quiet (the open app pings
+//    /session every 30s, so it never locks mid-use).
 
 const TRACK_START = "2026-09-28";
 const PACKAGES = ["pt", "coaching", "programme"];
@@ -14,7 +17,10 @@ const TENURES = ["new", "newish", "longstanding"];
 const METHODS = ["manual", "dd"];
 const CLIENT_STATUSES = ["active", "paused", "finished"];
 const WEEKS = [4, 8, 12, 16];
-const LOCK_OPTIONS = [0, 1, 15, 60, 240];
+const LOCK_OPTIONS = [0, 1, 5, 15, 60, 240];
+// Server-side idle window. "Every open" (1) gets a 2 minute window; the app's own
+// lock screen handles re-opening.
+const idleSecs = (m) => (m <= 1 ? 120 : m * 60);
 const SESSION_DAYS = 365;
 const COOKIE = "tsp_session";
 const PBKDF2_ITER = 100000;
@@ -133,7 +139,7 @@ async function createSession(env, req, user) {
   const token = b64u.enc(randomBytes(32));
   const hash = hex(await sha256(token));
   const now = nowS();
-  const lockSecs = Math.max(user.lock_minutes || 0, 1) * 60;
+  const lockSecs = idleSecs(user.lock_minutes || 0);
   await env.PAY_DB.prepare(
     "INSERT INTO pay_sessions (token_hash,user_id,created_at,last_seen,expires_at,unlocked_until,user_agent) VALUES (?,?,?,?,?,?,?)"
   )
@@ -171,9 +177,9 @@ async function loadSession(req, env) {
 
 async function touchSession(env, s) {
   const now = nowS();
-  if (now - s.row.last_seen < 45) return;
+  if (now - s.row.last_seen < 25) return;
   await env.PAY_DB.prepare("UPDATE pay_sessions SET last_seen=?, expires_at=?, unlocked_until=? WHERE token_hash=?")
-    .bind(now, now + SESSION_DAYS * 86400, s.lockOn ? now + s.lockMinutes * 60 : s.row.unlocked_until, s.hash)
+    .bind(now, now + SESSION_DAYS * 86400, s.lockOn ? now + idleSecs(s.lockMinutes) : s.row.unlocked_until, s.hash)
     .run();
 }
 
@@ -612,7 +618,7 @@ export async function handlePay(req, env, url) {
         const now = nowS();
         await db
           .prepare("UPDATE pay_sessions SET unlocked_until = ?, last_seen = ?, expires_at = ? WHERE token_hash = ?")
-          .bind(now + Math.max(user.lock_minutes, 1) * 60, now, now + SESSION_DAYS * 86400, s.hash)
+          .bind(now + idleSecs(user.lock_minutes), now, now + SESSION_DAYS * 86400, s.hash)
           .run();
         return json({ ok: true }, 200, { "set-cookie": sessionCookie(s.token, SESSION_DAYS * 86400) });
       }
@@ -667,7 +673,7 @@ export async function handlePay(req, env, url) {
         .prepare("INSERT OR REPLACE INTO pay_passkeys (id, user_id, public_key, alg, sign_count, name, created_at) VALUES (?,?,?,?,0,?,?)")
         .bind(id, s.userId, b64u.enc(spki), alg, text(b.name, 60) || "This device", now)
         .run();
-      await db.prepare("UPDATE pay_sessions SET unlocked_until = ? WHERE token_hash = ?").bind(now + Math.max(s.lockMinutes, 1) * 60, s.hash).run();
+      await db.prepare("UPDATE pay_sessions SET unlocked_until = ? WHERE token_hash = ?").bind(now + idleSecs(s.lockMinutes), s.hash).run();
       return json({ ok: true });
     }
     if (path === "/webauthn/list" && method === "GET") {
@@ -687,7 +693,7 @@ export async function handlePay(req, env, url) {
         const m = Number(b.lockMinutes);
         if (!LOCK_OPTIONS.includes(m)) bad("Pick a lock time");
         stmts.push(db.prepare("UPDATE pay_users SET lock_minutes = ? WHERE id = ?").bind(m, s.userId));
-        stmts.push(db.prepare("UPDATE pay_sessions SET unlocked_until = ? WHERE token_hash = ?").bind(now + Math.max(m, 1) * 60, s.hash));
+        stmts.push(db.prepare("UPDATE pay_sessions SET unlocked_until = ? WHERE token_hash = ?").bind(now + idleSecs(m), s.hash));
       }
       if (b.name !== undefined) stmts.push(db.prepare("UPDATE pay_users SET name = ? WHERE id = ?").bind(text(b.name, 40), s.userId));
       if (stmts.length) await db.batch(stmts);

@@ -5,14 +5,22 @@
   const API = "/api/pay";
   const TRACK_START = "2026-09-28";
   const PKG = { pt: "PT only", coaching: "Full coaching", programme: "Programme" };
-  const PKG_LONG = { pt: "Personal training only", coaching: "Full coaching", programme: "Programme only" };
   const TEN = { new: "New", newish: "New-ish", longstanding: "Longstanding" };
   const METH = { manual: "Manual", dd: "Direct debit" };
   const METH_LONG = { manual: "Manual payment", dd: "Direct debit" };
   const CST = { active: "Active", paused: "Paused", finished: "Finished" };
   const STL = { paid: "Paid", unpaid: "Unpaid", overdue: "Overdue" };
   const WEEKS = [4, 8, 12, 16];
-  const LOCKS = { 1: "Every open", 15: "15 min away", 60: "1 hour away", 240: "4 hours away", 0: "Never" };
+  const LOCKS = [
+    [1, "Every time I open it"],
+    [5, "After 5 minutes away"],
+    [15, "After 15 minutes away"],
+    [60, "After an hour away"],
+    [0, "Never"],
+  ];
+  const LOCK_GRACE_MS = 10000; // "every time": ignore quick glances at a notification
+  const TAB_ORDER = { month: 0, calendar: 1, clients: 3, more: 4 };
+  const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // ---------- tiny utils ----------
   const $ = (s, el = document) => el.querySelector(s);
@@ -35,9 +43,10 @@
     } catch {}
   };
 
-  // dates — everything is a 'YYYY-MM-DD' string in UK time
+  // dates — 'YYYY-MM-DD' strings in UK time
   const londonToday = () =>
     new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+  const londonHour = () => Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "numeric", hour12: false }).format(new Date()));
   const nums = (iso) => iso.split("-").map(Number);
   const utc = (iso) => {
     const [y, m, d] = nums(iso);
@@ -79,15 +88,8 @@
     return Math.round(parseFloat(t) * 100);
   };
   const moneyInput = (p) => (p == null ? "" : p % 100 ? (p / 100).toFixed(2) : String(p / 100));
-
   const initials = (name) =>
-    String(name || "?")
-      .trim()
-      .split(/\s+/)
-      .slice(0, 2)
-      .map((w) => w[0])
-      .join("")
-      .toUpperCase();
+    String(name || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 
   // ---------- icons ----------
   const P = {
@@ -115,6 +117,10 @@
     userplus: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5 1.6 0 3 .4 4.1 1.2M19 14v6M16 17h6"/>',
     share: '<path d="M12 3v12M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>',
     user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c.8-4 4-6 8-6s7.2 2 8 6"/>',
+    moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/>',
+    pause: '<rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/>',
+    play: '<path d="M7 5.5v13l11-6.5z"/>',
+    edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
     faceid:
       '<path d="M3 8V6a3 3 0 0 1 3-3h2M16 3h2a3 3 0 0 1 3 3v2M21 16v2a3 3 0 0 1-3 3h-2M8 21H6a3 3 0 0 1-3-3v-2"/><path d="M8.5 9v1.5M15.5 9v1.5M12 9v4.5h-1"/><path d="M8.8 16.3c1.9 1.4 4.5 1.4 6.4 0"/>',
   };
@@ -122,7 +128,7 @@
     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${P[n]}</svg>`;
   const rings =
     '<svg class="rings" viewBox="0 0 200 200" fill="none" stroke="rgba(255,255,255,.14)" aria-hidden="true">' +
-    [30, 48, 66, 84, 100].map((r) => `<circle cx="100" cy="100" r="${r}"/>`).join("") +
+    [30, 48, 66, 84, 100].map((r, i) => `<circle cx="100" cy="100" r="${r}" ${i % 2 ? 'stroke-dasharray="3 7"' : ""}/>`).join("") +
     "</svg>";
 
   // ---------- state ----------
@@ -131,11 +137,14 @@
     data: null,
     cmap: new Map(),
     smap: new Map(),
-    tab: pref("tab", "month"),
+    tab: "month", // always opens on Month
+    clientId: null, // open client profile
     month: null,
     calMonth: null,
     calDay: null,
     calMode: "due",
+    calAnim: "",
+    heroAnim: "",
     scope: "month",
     q: "",
     fStatus: "all",
@@ -145,9 +154,11 @@
     cq: "",
     platformAuth: false,
     lastSync: 0,
-    animate: true,
+    locked: false,
+    counts: {},
+    segPos: {},
+    suppressClick: false,
   };
-  if (!["month", "calendar", "clients", "more"].includes(S.tab)) S.tab = "month";
 
   const client = (id) => S.cmap.get(id);
   const cname = (p) => client(p.client_id)?.name || "Deleted client";
@@ -160,6 +171,58 @@
     S.cmap = new Map(d.clients.map((c) => [c.id, c]));
     S.smap = new Map(d.schedules.map((s) => [s.id, s]));
     S.lastSync = Date.now();
+  }
+
+  // ---------- theme ----------
+  function applyTheme(t) {
+    const el = document.documentElement;
+    if (t === "light" || t === "dark") el.dataset.theme = t;
+    else el.removeAttribute("data-theme");
+    const forced = t === "light" ? "#E8EBE8" : t === "dark" ? "#0E0F0D" : null;
+    $$('meta[name="theme-color"]').forEach((m) =>
+      m.setAttribute("content", forced || ((m.getAttribute("media") || "").includes("dark") ? "#0E0F0D" : "#E8EBE8"))
+    );
+  }
+  function setTheme(t) {
+    setPref("theme", t);
+    applyTheme(t);
+  }
+  window.matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => applyTheme(pref("theme", "system")));
+
+  // ---------- feel: haptics + particles ----------
+  function haptic() {
+    try {
+      if (navigator.vibrate) {
+        navigator.vibrate(12);
+        return;
+      }
+      // iOS 18+: toggling a native switch gives a light tap
+      const l = document.createElement("label");
+      l.style.cssText = "position:fixed;opacity:0;pointer-events:none";
+      const i = document.createElement("input");
+      i.type = "checkbox";
+      i.setAttribute("switch", "");
+      l.appendChild(i);
+      document.body.appendChild(l);
+      l.click();
+      l.remove();
+    } catch {}
+  }
+  function burst(x, y) {
+    if (reduced) return;
+    const b = document.createElement("div");
+    b.className = "burst";
+    b.style.left = x + "px";
+    b.style.top = y + "px";
+    let html = "";
+    for (let i = 0; i < 12; i++) {
+      const a = -Math.PI / 2 + (Math.random() - 0.5) * Math.PI * 1.5;
+      const d = 50 + Math.random() * 60;
+      html += `<i style="--dx:${Math.cos(a) * d}px;--dy:${Math.sin(a) * d + 30}px;--r:${(Math.random() - 0.5) * 540}deg;animation-delay:${i * 12}ms">£</i>`;
+    }
+    b.innerHTML = html;
+    document.body.appendChild(b);
+    setTimeout(() => b.remove(), 1100);
   }
 
   // ---------- API ----------
@@ -275,8 +338,22 @@
       },
     });
   }
-  const webauthnError = (e) =>
-    e && (e.name === "NotAllowedError" || e.name === "AbortError") ? "Face ID was cancelled." : e?.message || "Face ID didn't work.";
+  const isCancel = (e) => e && (e.name === "NotAllowedError" || e.name === "AbortError");
+  const webauthnError = (e) => (isCancel(e) ? "Face ID was cancelled." : e?.message || "Face ID didn't work.");
+
+  // ---------- lock timing ----------
+  // The app locks when you come back after being away, never in the middle of using it.
+  function awayTooLong() {
+    const s = S.session;
+    if (!s?.hasPasskey || !s.lockMinutes) return false;
+    const h = Number(pref("hiddenAt", "0"));
+    if (!h) return false;
+    const limit = s.lockMinutes <= 1 ? LOCK_GRACE_MS : s.lockMinutes * 60000;
+    return Date.now() - h >= limit;
+  }
+  const markHidden = () => {
+    if (S.data && !S.locked) setPref("hiddenAt", String(Date.now()));
+  };
 
   // ---------- toast ----------
   let toastTimer;
@@ -293,7 +370,7 @@
     });
     t.classList.add("show");
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(hideToast, actions.length ? 6000 : 3000);
+    toastTimer = setTimeout(hideToast, actions.length ? 6000 : 2800);
   }
   const hideToast = () => $("#toast").classList.remove("show");
 
@@ -311,13 +388,14 @@
       "x"
     )}</button></div><div class="sheet-body">${html}</div>`;
     $("#sheet-root").append(bd, sh);
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      bd.classList.add("show");
-      sh.classList.add("show");
-    }));
+    requestAnimationFrame(() =>
+      requestAnimationFrame(() => {
+        bd.classList.add("show");
+        sh.classList.add("show");
+      })
+    );
     bd.onclick = () => closeSheet();
     $("[data-close]", sh).onclick = () => closeSheet();
-    // option pills
     sh.addEventListener("click", (e) => {
       const b = e.target.closest(".opt");
       if (!b) return;
@@ -326,11 +404,10 @@
       g.dataset.value = b.dataset.val;
       g.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    // drag down to close
+    // drag the top of the sheet down to close
     let y0 = null;
     let dy = 0;
-    const head = [$(".grab", sh), $(".sheet-head", sh)];
-    head.forEach((h) => {
+    [$(".grab", sh), $(".sheet-head", sh)].forEach((h) => {
       h.addEventListener("touchstart", (e) => {
         y0 = e.touches[0].clientY;
         dy = 0;
@@ -368,7 +445,7 @@
     setTimeout(() => {
       bd.remove();
       sh.remove();
-    }, 360);
+    }, 380);
   }
   const opts = (name, map, sel) =>
     `<div class="opts" data-name="${name}" data-value="${esc(sel ?? "")}">${Object.entries(map)
@@ -385,27 +462,26 @@
     root().innerHTML = `
       <div class="auth">
         <div class="auth-hero">
-          <div class="coin-logo big" style="animation:none">£</div>
+          <div class="coin-logo big spin">£</div>
           <h1>TrueStay <em>Pay</em></h1>
           <p>One-time setup. Choose the email and password you'll use to get in. After this, you stay signed in.</p>
         </div>
         <form class="auth-card" id="authForm" autocomplete="on">
-          <div class="field"><label for="f-name">First name</label><input id="f-name" name="name" autocomplete="given-name" placeholder="Shan"></div>
+          <div class="field"><label for="f-name">Your first name</label><input id="f-name" name="name" autocomplete="given-name" required></div>
           <div class="field"><label for="f-email">Email</label><input id="f-email" name="email" type="email" autocomplete="username" autocapitalize="off" required></div>
           <div class="field"><label for="f-pw">Password <span>10+ characters</span></label><input id="f-pw" name="password" type="password" autocomplete="new-password" minlength="10" required></div>
-          <div class="field"><label for="f-code">Setup code</label><input id="f-code" name="code" autocapitalize="characters" autocomplete="one-time-code" placeholder="From Claude" required></div>
+          <div class="field"><label for="f-code">Setup code</label><input id="f-code" name="code" autocapitalize="characters" autocomplete="one-time-code" required></div>
           <div class="err" id="authErr"></div>
           <button class="btn lime" type="submit">Create my account</button>
         </form>
       </div>`;
     $("#authForm").onsubmit = async (e) => {
       e.preventDefault();
-      const f = new FormData(e.target);
       const btn = $("button[type=submit]", e.target);
       btn.disabled = true;
       $("#authErr").textContent = "";
       try {
-        await api("/setup", { method: "POST", raw: true, body: Object.fromEntries(f) });
+        await api("/setup", { method: "POST", raw: true, body: Object.fromEntries(new FormData(e.target)) });
         await boot();
       } catch (err) {
         $("#authErr").textContent = err.message;
@@ -416,10 +492,11 @@
 
   function renderLogin() {
     closeSheet(true);
+    S.locked = false;
     root().innerHTML = `
       <div class="auth">
         <div class="auth-hero">
-          <div class="coin-logo big" style="animation:none">£</div>
+          <div class="coin-logo big spin">£</div>
           <h1>Money in, <em>sorted.</em></h1>
           <p>Sign in once on this device and you'll stay signed in.</p>
         </div>
@@ -433,12 +510,12 @@
       </div>`;
     $("#authForm").onsubmit = async (e) => {
       e.preventDefault();
-      const f = new FormData(e.target);
       const btn = $("button[type=submit]", e.target);
       btn.disabled = true;
       $("#authErr").textContent = "";
       try {
-        await api("/login", { method: "POST", raw: true, body: Object.fromEntries(f) });
+        await api("/login", { method: "POST", raw: true, body: Object.fromEntries(new FormData(e.target)) });
+        setPref("hiddenAt", "0");
         await boot();
       } catch (err) {
         $("#authErr").textContent = err.message;
@@ -451,6 +528,7 @@
         $("#authErr").textContent = "";
         try {
           await passkeyAuth();
+          setPref("hiddenAt", "0");
           await boot();
         } catch (e) {
           $("#authErr").textContent = webauthnError(e);
@@ -458,30 +536,44 @@
       };
   }
 
+  let unlocking = false;
   function renderLock() {
     closeSheet(true);
+    S.locked = true;
     root().innerHTML = `
-      <div class="lock-screen">
+      <div class="lock-screen" id="lockScreen">
+        <div class="spacer"></div>
         <div class="faceid">${ic("faceid")}</div>
-        <h1>TrueStay Pay is locked</h1>
-        <p>Unlock to see your numbers.</p>
-        <div class="err" id="lockErr" style="color:var(--red)"></div>
-        <button class="btn lime" id="unlockBtn">${ic("faceid")} Unlock with Face ID</button>
-        <button class="btn ghost" id="pwBtn">Use password instead</button>
+        <h1>Locked</h1>
+        <p>Tap anywhere to unlock with Face ID</p>
+        <div class="err" id="lockErr"></div>
+        <div class="spacer"></div>
+        <button class="btn lime" id="unlockBtn">${ic("faceid")} Unlock</button>
+        <button class="pw" id="pwBtn">Use password instead</button>
       </div>`;
-    const go = async () => {
-      $("#lockErr").textContent = "";
+    const go = async (silent) => {
+      if (unlocking) return;
+      unlocking = true;
+      const el = $("#lockErr");
+      if (el) el.textContent = "";
       try {
         await passkeyAuth();
+        setPref("hiddenAt", "0");
+        S.locked = false;
+        haptic();
         await boot();
       } catch (e) {
-        const el = $("#lockErr");
-        if (el) el.textContent = webauthnError(e);
+        const el2 = $("#lockErr");
+        if (el2 && !(silent && isCancel(e))) el2.textContent = webauthnError(e);
+      } finally {
+        unlocking = false;
       }
     };
-    $("#unlockBtn").onclick = go;
-    $("#pwBtn").onclick = renderLogin;
-    go();
+    $("#lockScreen").onclick = (e) => {
+      if (e.target.closest("#pwBtn")) return renderLogin();
+      go(false);
+    };
+    go(true); // try straight away; if iOS wants a tap first, one tap does it
   }
 
   // ---------- derived numbers ----------
@@ -509,29 +601,58 @@
     return out;
   }
 
+  // animated numbers: rendered at their old value, then counted to the new one
+  const count = (key, value, kind = "money") => {
+    const from = S.counts[key] ?? 0;
+    const f = kind === "big" ? moneyBig : kind === "pct" ? (v) => v + "%" : money;
+    return `<span data-count="${key}" data-val="${value}" data-kind="${kind}">${f(from)}</span>`;
+  };
+  function runCounts() {
+    $$("[data-count]").forEach((el) => {
+      const key = el.dataset.count;
+      const to = Number(el.dataset.val);
+      const kind = el.dataset.kind;
+      const f = kind === "big" ? moneyBig : kind === "pct" ? (v) => v + "%" : money;
+      const from = S.counts[key] ?? 0;
+      S.counts[key] = to;
+      if (from === to || reduced) {
+        el.innerHTML = f(to);
+        return;
+      }
+      const t0 = performance.now();
+      const dur = 800;
+      const step = (now) => {
+        const k = Math.min(1, (now - t0) / dur);
+        const e = 1 - Math.pow(1 - k, 3);
+        el.innerHTML = f(Math.round(from + (to - from) * e));
+        if (k < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+  }
+
   // ---------- shared row renderers ----------
   function pill(p) {
     const st = stOf(p);
     if (st === "paid") return `<span class="pill paid">Paid ${fmtDay(p.paid_date)}</span>`;
-    if (st === "overdue") {
-      const late = daysBetween(p.due_date, londonToday());
-      return `<span class="pill overdue">Overdue · ${late}d</span>`;
-    }
+    if (st === "overdue") return `<span class="pill overdue">Overdue · ${daysBetween(p.due_date, londonToday())}d</span>`;
     return `<span class="pill unpaid">Unpaid</span>`;
   }
-  function prow(p) {
+  function prow(p, { showClient = true } = {}) {
     const st = stOf(p);
     const rep = schedActive(p.schedule_id) ? " " + ic("repeat") : "";
-    return `<div class="prow st-${st}" data-open-pay="${p.id}" role="button" tabindex="0">
-      <div class="av">${esc(initials(cname(p)))}</div>
+    const title = showClient ? esc(cname(p)) : `Due ${fmtShort(p.due_date)}`;
+    const meta = `${esc(pkgText(p.package, p.programme_weeks))} · ${METH[p.method]}${rep}`;
+    const row = `<div class="prow st-${st}" data-open-pay="${p.id}" role="button" tabindex="0">
+      <div class="av">${showClient ? esc(initials(cname(p))) : ic("receipt")}</div>
       <div class="main">
-        <div class="name">${esc(cname(p))}</div>
-        <div class="meta">${esc(pkgText(p.package, p.programme_weeks))} · ${METH[p.method]}${rep}</div>
+        <div class="name">${title}</div>
+        <div class="meta">${meta}</div>
         <div style="margin-top:6px">${pill(p)}</div>
       </div>
       <div class="right">
         <div class="amt num">${money(p.amount_pence)}</div>
-        <div class="when">Due ${fmtShort(p.due_date)}</div>
+        ${showClient ? `<div class="when">Due ${fmtShort(p.due_date)}</div>` : ""}
       </div>
       ${
         st === "paid"
@@ -539,6 +660,7 @@
           : `<button class="paybtn" data-pay="${p.id}" aria-label="Mark ${esc(cname(p))} as paid">${ic("check")}</button>`
       }
     </div>`;
+    return st === "paid" ? `<div class="swipe" data-pid="${p.id}">${row}</div>` : `<div class="swipe" data-pid="${p.id}"><div class="swipe-bg">${ic("check")} Paid</div>${row}</div>`;
   }
   function ptable(ps) {
     return `<div class="table-wrap"><table class="pt">
@@ -559,18 +681,17 @@
         })
         .join("")}</tbody></table></div>`;
   }
+  const topbar = (title, right = "") => `<div class="topbar"><div class="title">${title}</div><div class="actions">${right}</div></div>`;
 
   // ---------- views ----------
-  function topbar(title, right = "") {
-    return `<div class="topbar"><div class="title">${title}</div><div class="actions">${right}</div></div>`;
-  }
-
   function viewMonth() {
     const mk = S.month;
     const today = londonToday();
     const cur = mKey(today);
     const st = monthStats(mk);
-    const name = S.session?.name ? " " + esc(S.session.name) : "";
+    const name = S.session?.name ? ", " + esc(S.session.name) : "";
+    const h = londonHour();
+    const greet = h < 12 ? "Morning" : h < 17 ? "Afternoon" : "Evening";
     const range = monthRange();
     const maxBar = Math.max(1, ...range.map((k) => sum(S.data.payments.filter((p) => mKey(p.due_date) === k))));
     const idx = range.indexOf(mk);
@@ -580,27 +701,27 @@
     const showFace = S.platformAuth && !S.session.hasPasskey && pref("hideFace", "0") !== "1";
 
     return `
-      ${topbar(`<span class="coin-logo">£</span>`, `<a class="round" href="${API}/export?type=payments" aria-label="Export payments CSV">${ic("download")}</a><button class="round" data-tab="more" aria-label="Settings">${ic("user")}</button>`)}
-      <h1 class="hello">Hi${name}, <em>here's what's</em> coming in.</h1>
+      ${topbar(`<span class="coin-logo spin">£</span>`, `<a class="round" href="${API}/export?type=payments" aria-label="Export payments CSV">${ic("download")}</a><button class="round" data-tab="more" aria-label="Settings">${ic("user")}</button>`)}
+      <h1 class="hello rise" style="--i:0">${greet}${name}. <em>Here's what's</em> coming in.</h1>
 
-      <div class="monthbar">
+      <div class="monthbar rise" style="--i:1">
         <div class="m">${mLabel(mk)}${mk === cur ? "<small>this month</small>" : ""}</div>
         <div class="navs">
-          <button class="round" data-month="${range[idx - 1] || ""}" ${idx > 0 ? "" : "disabled"} aria-label="Previous month">${ic("left")}</button>
-          <button class="round" data-month="${range[idx + 1] || ""}" ${idx < range.length - 1 ? "" : "disabled"} aria-label="Next month">${ic("right")}</button>
+          <button class="round" data-month="${range[idx - 1] || ""}" data-dir="-1" ${idx > 0 ? "" : "disabled"} aria-label="Previous month">${ic("left")}</button>
+          <button class="round" data-month="${range[idx + 1] || ""}" data-dir="1" ${idx < range.length - 1 ? "" : "disabled"} aria-label="Next month">${ic("right")}</button>
         </div>
       </div>
       <div class="strip" id="strip">
         ${range
-          .map((k) => {
+          .map((k, i) => {
             const ps = S.data.payments.filter((p) => mKey(p.due_date) === k);
             const due = sum(ps);
             const got = sum(ps.filter((p) => p.paid_date));
-            const h = Math.round((due / maxBar) * 40);
-            const hg = due ? Math.round((got / due) * h) : 0;
-            return `<button class="mpill${k === mk ? " sel" : ""}${k === cur ? " now" : ""}" data-month="${k}" aria-label="${mLabel(k)}">
-              <div style="display:flex;flex-direction:column;justify-content:flex-end;height:42px">
-                <div class="bar" style="height:${Math.max(4, h - hg)}px;${hg ? "border-radius:8px 8px 0 0" : ""}"></div>
+            const hh = Math.round((due / maxBar) * 40);
+            const hg = due ? Math.round((got / due) * hh) : 0;
+            return `<button class="mpill${k === mk ? " sel" : ""}${k === cur ? " now" : ""}" data-month="${k}" style="--i:${i}" aria-label="${mLabel(k)}">
+              <div class="bars">
+                <div class="bar" style="height:${Math.max(4, hh - hg)}px;${hg ? "border-radius:8px 8px 0 0" : ""}"></div>
                 ${hg ? `<div class="bar recv" style="height:${hg}px;border-radius:0 0 4px 4px"></div>` : ""}
               </div>
               <span class="lbl">${mShort(k)}</span></button>`;
@@ -608,35 +729,35 @@
           .join("")}
       </div>
 
-      <section class="hero">
+      <section class="hero rise ${S.heroAnim}" style="--i:2" id="hero">
         ${rings}
         <div class="k">Due in ${mName(mk)}</div>
-        <div class="big num">${moneyBig(st.dueSum)}</div>
+        <div class="big num">${count("due", st.dueSum, "big")}</div>
         <div class="sub">${plural(st.due.length, "payment")} scheduled · ${money(st.collected)} of it paid</div>
         <div class="progress" role="img" aria-label="${pct}% of this month's payments collected">
-          <div class="fill" style="width:${Math.max(pct, 0)}%"><span class="knob">${pct}%</span></div>
+          <div class="fill" data-pct="${pct}" style="width:${S.counts.pct ?? 0}%"><span class="knob">${count("pct", pct, "pct")}</span></div>
         </div>
         <div class="progress-legend"><span>Collected ${money(st.collected)}</span><span>Left ${money(st.unpaidSum)}</span></div>
       </section>
 
       <div class="tiles">
-        <button class="tile lime wide" data-scope="received">
+        <button class="tile lime wide rise" style="--i:3" data-scope="received" id="recvTile">
           <span class="arrow">${ic("arrow")}</span>
           <div class="k">Received in ${mName(mk)}</div>
-          <div class="v num">${moneyBig(st.receivedSum)}</div>
+          <div class="v num">${count("recv", st.receivedSum, "big")}</div>
           <div class="s">${plural(st.received.length, "payment")} actually landed, by paid date</div>
         </button>
-        <button class="tile" data-scope="month" data-status="notpaid">
+        <button class="tile rise" style="--i:4" data-scope="month" data-status="notpaid">
           <span class="arrow">${ic("arrow")}</span>
           <div class="k">Still unpaid</div>
-          <div class="v num">${money(st.unpaidSum)}</div>
+          <div class="v num">${count("unpaid", st.unpaidSum)}</div>
           <div class="s">${plural(st.unpaid.length, "payment")} due in ${mShort(mk)}</div>
         </button>
-        <button class="tile red${st.overdueSum ? " has" : ""}" data-scope="unpaid" data-status="overdue">
+        <button class="tile red rise${st.overdueSum ? " has" : ""}" style="--i:5" data-scope="unpaid" data-status="overdue">
           <span class="arrow">${ic("arrow")}</span>
           <div class="k">Overdue now</div>
-          <div class="v num">${money(st.overdueSum)}</div>
-          <div class="s">${plural(st.overdue.length, "payment")}, all months</div>
+          <div class="v num">${count("overdue", st.overdueSum)}</div>
+          <div class="s">${st.overdue.length ? '<span class="live"></span>' : ""}${plural(st.overdue.length, "payment")}, all months</div>
         </button>
       </div>
       ${mk === mKey(TRACK_START) ? `<p class="note">${ic("info")}<span>Tracking started on 28 September 2026, so September only includes payments from then on.</span></p>` : ""}
@@ -654,7 +775,7 @@
 
       <div class="section-head">
         <h2>Payments</h2>
-        <div class="seg small icons" role="tablist" aria-label="View">
+        <div class="seg small icons" data-seg="listmode" aria-label="View">
           <button class="${S.listMode === "list" ? "on" : ""}" data-listmode="list" aria-label="List view">${ic("list")}</button>
           <button class="${S.listMode === "table" ? "on" : ""}" data-listmode="table" aria-label="Table view">${ic("table")}</button>
         </div>
@@ -664,7 +785,7 @@
           ? `<div class="empty"><b>Let's get your clients in</b><span>Add each client with their next payment. Turn on "repeat monthly" for the regulars and it'll look after itself.</span><button class="btn sm lime" data-action="add-client">${ic("userplus")} Add your first client</button></div>`
           : `
       <div class="filters">
-        <div class="seg small full">
+        <div class="seg small full" data-seg="scope">
           <button class="${S.scope === "month" ? "on" : ""}" data-scope="month" data-status="all">Due in ${mShort(mk)}</button>
           <button class="${S.scope === "received" ? "on" : ""}" data-scope="received" data-status="all">Paid in ${mShort(mk)}</button>
           <button class="${S.scope === "unpaid" ? "on" : ""}" data-scope="unpaid" data-status="all">All unpaid</button>
@@ -702,9 +823,10 @@
       const q = S.q.trim().toLowerCase();
       ps = ps.filter((p) => cname(p).toLowerCase().includes(q));
     }
+    const byDue = (a, b) => (a.due_date < b.due_date ? -1 : a.due_date > b.due_date ? 1 : a.id - b.id);
     if (S.scope === "received") ps.sort((a, b) => (a.paid_date < b.paid_date ? -1 : a.paid_date > b.paid_date ? 1 : a.id - b.id));
-    else if (S.scope === "all") ps.sort((a, b) => (a.due_date < b.due_date ? 1 : a.due_date > b.due_date ? -1 : b.id - a.id));
-    else ps.sort((a, b) => (a.due_date < b.due_date ? -1 : a.due_date > b.due_date ? 1 : a.id - b.id));
+    else if (S.scope === "all") ps.sort((a, b) => -byDue(a, b));
+    else ps.sort(byDue);
     return ps;
   }
 
@@ -721,14 +843,14 @@
           : S.scope === "unpaid"
           ? "Nobody owes you anything. Nice."
           : `Nothing scheduled for ${mName(S.month)} yet.`;
-      el.innerHTML = `<div class="empty"><b>${msg}</b>${
-        S.scope === "month" ? `<button class="btn sm" data-action="add-payment">${ic("plus")} Add payment</button>` : ""
-      }</div>`;
+      el.innerHTML = `<div class="empty"><b>${msg}</b>${S.scope === "month" ? `<button class="btn sm" data-action="add-payment">${ic("plus")} Add payment</button>` : ""}</div>`;
       return;
     }
+    const hasUnpaid = ps.some((p) => !p.paid_date);
     el.innerHTML =
-      (S.listMode === "table" ? ptable(ps) : `<div class="list">${ps.map(prow).join("")}</div>`) +
-      `<div class="total-line"><span>${plural(ps.length, "payment")}</span><span>Total <b class="num">${money(sum(ps))}</b></span></div>`;
+      (S.listMode === "table" ? ptable(ps) : `<div class="list">${ps.map((p) => prow(p)).join("")}</div>`) +
+      `<div class="total-line"><span>${plural(ps.length, "payment")}</span><span>Total <b class="num">${money(sum(ps))}</b></span></div>` +
+      (S.listMode === "list" && hasUnpaid ? `<p class="tip">Tip: swipe a payment left to mark it paid</p>` : "");
   }
 
   function viewCalendar() {
@@ -751,11 +873,8 @@
     for (let d = 1; d <= n; d++) {
       const iso = `${mk}-${pad(d)}`;
       const items = (byDay.get(iso) || []).slice().sort((a, b) => order[stOf(a)] - order[stOf(b)]);
-      const coins = items
-        .slice(0, 3)
-        .map((p) => `<span class="coin ${stOf(p)}">£</span>`)
-        .join("");
-      const more = items.length > 3 ? `<span class="coin more">+${items.length - 3}</span>` : "";
+      const coins = items.slice(0, 3).map((p) => `<span class="coin ${stOf(p)}" style="--d:${d}">£</span>`).join("");
+      const more = items.length > 3 ? `<span class="coin more" style="--d:${d}">+${items.length - 3}</span>` : "";
       cells += `<button class="day${iso === today ? " today" : ""}${iso === S.calDay ? " sel" : ""}${iso < TRACK_START ? " pre" : ""}" data-day="${iso}" aria-label="${fmtLong(iso)}${items.length ? ", " + plural(items.length, "payment") : ""}">
         <span class="dn">${d}</span>
         <span class="coins">${coins}${more}</span>
@@ -765,8 +884,8 @@
     const dayItems = (byDay.get(S.calDay) || []).slice().sort((a, b) => order[stOf(a)] - order[stOf(b)] || a.id - b.id);
     const st = monthStats(mk);
     return `
-      ${topbar("Calendar", `<div class="seg small"><button class="${S.calMode === "due" ? "on" : ""}" data-calmode="due">Due</button><button class="${S.calMode === "paid" ? "on" : ""}" data-calmode="paid">Received</button></div>`)}
-      <div class="cal-card">
+      ${topbar("Calendar", `<div class="seg small" data-seg="calmode"><button class="${S.calMode === "due" ? "on" : ""}" data-calmode="due">Due</button><button class="${S.calMode === "paid" ? "on" : ""}" data-calmode="paid">Received</button></div>`)}
+      <div class="cal-card rise" style="--i:0" id="calCard">
         <div class="cal-head">
           <div class="m">${mLabel(mk)}</div>
           <div class="navs">
@@ -776,40 +895,41 @@
           </div>
         </div>
         <div class="wk"><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span></div>
-        <div class="grid">${cells}</div>
+        <div class="grid ${S.calAnim}" id="calGrid">${cells}</div>
         <div class="cal-legend"><span><i style="background:var(--red)"></i>Overdue</span><span><i style="background:var(--amber)"></i>Unpaid</span><span><i style="background:var(--green)"></i>Paid</span></div>
       </div>
       <div class="cal-totals">
-        <div class="tile"><div class="k">Due in ${mShort(mk)}</div><div class="v num">${money(st.dueSum)}</div><div class="s">${money(st.unpaidSum)} still unpaid</div></div>
-        <div class="tile lime"><div class="k">Received in ${mShort(mk)}</div><div class="v num" style="font-size:27px">${money(st.receivedSum)}</div><div class="s">by paid date</div></div>
+        <div class="tile rise" style="--i:1"><div class="k">Due in ${mShort(mk)}</div><div class="v num">${count("cdue", st.dueSum)}</div><div class="s">${money(st.unpaidSum)} still unpaid</div></div>
+        <div class="tile lime rise" style="--i:2"><div class="k">Received in ${mShort(mk)}</div><div class="v num" style="font-size:27px">${count("crecv", st.receivedSum)}</div><div class="s">by paid date</div></div>
       </div>
       <div class="day-head"><h3>${fmtLong(S.calDay)}</h3><span class="num">${dayItems.length ? money(sum(dayItems)) : ""}</span></div>
       ${
         dayItems.length
-          ? `<div class="list">${dayItems.map(prow).join("")}</div>`
+          ? `<div class="list">${dayItems.map((p) => prow(p)).join("")}</div>`
           : `<div class="empty"><b>${S.calMode === "due" ? "Nothing due" : "Nothing received"} on this day</b>${
               S.data.clients.length ? `<button class="btn sm" data-action="add-payment" data-date="${S.calDay}">${ic("plus")} Add payment due this day</button>` : ""
             }</div>`
       }`;
   }
 
-  function clientOwes(id) {
-    return S.data.payments.filter((p) => p.client_id === id && stOf(p) === "overdue");
-  }
-  function clientNext(id) {
-    return S.data.payments.filter((p) => p.client_id === id && !p.paid_date && p.due_date >= londonToday()).sort((a, b) => (a.due_date < b.due_date ? -1 : 1))[0];
-  }
+  const clientPayments = (id) => S.data.payments.filter((p) => p.client_id === id);
+  const clientOwes = (id) => clientPayments(id).filter((p) => stOf(p) === "overdue");
+  const clientNext = (id) =>
+    clientPayments(id)
+      .filter((p) => !p.paid_date && p.due_date >= londonToday())
+      .sort((a, b) => (a.due_date < b.due_date ? -1 : 1))[0];
 
   function viewClients() {
+    if (S.clientId && client(S.clientId)) return viewClient(client(S.clientId));
+    S.clientId = null;
     const cs = S.data.clients;
     const counts = { active: 0, paused: 0, finished: 0 };
     cs.forEach((c) => counts[c.status]++);
-    let list = S.cStatus === "all" ? cs : cs.filter((c) => c.status === S.cStatus);
     return `
       ${topbar("Clients", `<button class="round lime" data-action="add-client" aria-label="Add client">${ic("plus")}</button>`)}
       <div class="filters">
         <label class="search">${ic("search")}<input id="cq" type="search" placeholder="Search clients" value="${esc(S.cq)}" autocomplete="off"></label>
-        <div class="seg small full">
+        <div class="seg small full" data-seg="cstatus">
           ${["active", "paused", "finished"].map((s) => `<button class="${S.cStatus === s ? "on" : ""}" data-cstatus="${s}">${CST[s]} ${counts[s]}</button>`).join("")}
           <button class="${S.cStatus === "all" ? "on" : ""}" data-cstatus="all">All ${cs.length}</button>
         </div>
@@ -831,7 +951,7 @@
       return;
     }
     el.innerHTML = `<div class="list">${list
-      .map((c) => {
+      .map((c, i) => {
         const owes = clientOwes(c.id);
         const next = clientNext(c.id);
         const right = owes.length
@@ -839,39 +959,111 @@
           : next
           ? `<b class="num">${money(next.amount_pence)}</b>next ${fmtDay(next.due_date)}`
           : `<b>—</b>nothing due`;
-        return `<button class="crow${c.status !== "active" ? " dim" : ""}" data-open-client="${c.id}">
+        return `<button class="crow rise${c.status !== "active" ? " dim" : ""}" style="--i:${Math.min(i, 8)}" data-open-client="${c.id}">
           <div class="av">${esc(initials(c.name))}</div>
           <div class="main">
             <div class="name"><span class="t">${esc(c.name)}</span><span class="tag${c.tenure === "new" ? " new" : ""}">${TEN[c.tenure]}</span>${c.status !== "active" ? `<span class="tag">${CST[c.status]}</span>` : ""}</div>
             <div class="meta">${esc(pkgText(c.package, c.programme_weeks))} · ${money(c.price_pence)} · ${METH[c.method]}</div>
           </div>
           <div class="right">${right}</div>
+          <span class="chev">${ic("right")}</span>
         </button>`;
       })
       .join("")}</div>`;
   }
 
+  // Client profile: read-only by default, edit is a separate, clearly-labelled sheet.
+  function viewClient(c) {
+    const ps = clientPayments(c.id).sort((a, b) => (a.due_date < b.due_date ? 1 : a.due_date > b.due_date ? -1 : b.id - a.id));
+    const owes = clientOwes(c.id);
+    const next = clientNext(c.id);
+    const received = ps.filter((p) => p.paid_date);
+    const reps = S.data.schedules.filter((s) => s.client_id === c.id && s.active);
+    return `
+      <div class="topbar">
+        <button class="back" data-action="back">${ic("left")} Clients</button>
+        <div class="actions"><button class="btn sm ghost" data-action="edit-client" data-client="${c.id}">${ic("edit")} Edit</button></div>
+      </div>
+      <section class="profile rise" style="--i:0">
+        ${rings}
+        <div class="top">
+          <div class="bigav">${esc(initials(c.name))}</div>
+          <div style="min-width:0">
+            <h1>${esc(c.name)}</h1>
+            <div class="tags"><span class="tag dark${c.tenure === "new" ? " new" : ""}">${TEN[c.tenure]}</span><span class="tag dark">${CST[c.status]}</span></div>
+          </div>
+        </div>
+        <div class="facts">
+          <div>Package<b>${esc(pkgText(c.package, c.programme_weeks))}</b></div>
+          <div>Agreed price<b class="num">${money(c.price_pence)}</b></div>
+          <div>Usually pays by<b>${METH_LONG[c.method]}</b></div>
+          <div>Next payment<b class="num">${next ? `${fmtDay(next.due_date)} · ${money(next.amount_pence)}` : "None scheduled"}</b></div>
+        </div>
+      </section>
+      <div class="tiles" style="grid-template-columns:1fr 1fr">
+        <div class="tile red rise${owes.length ? " has" : ""}" style="--i:1"><div class="k">Overdue</div><div class="v num">${count("c-owe-" + c.id, sum(owes))}</div><div class="s">${owes.length ? '<span class="live"></span>' : ""}${plural(owes.length, "payment")}</div></div>
+        <div class="tile lime rise" style="--i:2"><div class="k">Received</div><div class="v num" style="font-size:27px">${count("c-got-" + c.id, sum(received))}</div><div class="s">since tracking began</div></div>
+      </div>
+      <div class="quick rise" style="--i:3">
+        <button class="btn lime" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add payment</button>
+        ${
+          c.status === "active"
+            ? `<button class="btn ghost" data-action="client-status" data-client="${c.id}" data-to="paused">${ic("pause")} Pause</button>`
+            : `<button class="btn ghost" data-action="client-status" data-client="${c.id}" data-to="active">${ic("play")} Make active</button>`
+        }
+      </div>
+      ${
+        reps.length
+          ? `<div class="section-head"><h2 class="sm">Repeats monthly</h2></div>${reps
+              .map(
+                (s) => `<button class="rep-card" data-sched-edit="${s.id}" style="width:100%;text-align:left">
+                  <span class="ic">${ic("repeat")}</span>
+                  <span class="l"><b class="num">${money(s.amount_pence)} on the ${ordinal(s.day_of_month)}</b><small>${esc(pkgText(s.package, s.programme_weeks))} · ${METH_LONG[s.method]}</small></span>
+                  <span class="r" style="color:var(--muted)">${ic("right")}</span>
+                </button>`
+              )
+              .join("")}`
+          : ""
+      }
+      ${c.notes ? `<div class="section-head"><h2 class="sm">Notes</h2></div><div class="notes-card">${esc(c.notes)}</div>` : ""}
+      <div class="section-head"><h2 class="sm">Payments</h2><span style="color:var(--muted);font-size:14px">${ps.length ? plural(ps.length, "payment") : ""}</span></div>
+      ${
+        ps.length
+          ? `<div class="list">${ps.map((p) => prow(p, { showClient: false })).join("")}</div>`
+          : `<div class="empty"><b>No payments yet</b><button class="btn sm" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add their first payment</button></div>`
+      }`;
+  }
+
   function viewMore() {
     const s = S.session;
     const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+    const theme = pref("theme", "system");
     return `
       ${topbar("Settings")}
       <div class="group-title">Account</div>
-      <div class="group">
+      <div class="group rise" style="--i:0">
         <button class="row" data-action="edit-name"><span class="ic">${ic("user")}</span><span class="l">${esc(s.name || "Add your name")}<small>${esc(s.email || "")}</small></span><span class="r">${ic("right")}</span></button>
         <button class="row" data-action="password"><span class="ic">${ic("key")}</span><span class="l">Change password</span><span class="r">${ic("right")}</span></button>
       </div>
 
+      <div class="group-title">Appearance</div>
+      <div class="group rise" style="--i:1">
+        <div class="row stack"><span class="ic">${ic("moon")}</span><span class="l">Theme<small>System follows your iPhone's light/dark setting</small></span>
+          <div class="seg small full" data-seg="theme" style="margin-top:6px">
+            ${["system", "light", "dark"].map((t) => `<button class="${theme === t ? "on" : ""}" data-theme-set="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}
+          </div>
+        </div>
+      </div>
+
       <div class="group-title">Face ID</div>
-      <div class="group">
+      <div class="group rise" style="--i:2">
         ${
           s.hasPasskey
-            ? `<div class="row"><span class="ic">${ic("faceid")}</span><span class="l">Face ID is on<small>Works on any device signed in to your iCloud Keychain</small></span></div>
-               <label class="row"><span class="ic">${ic("lock")}</span><span class="l">Lock after</span>
-                 <select class="pick" id="lockSel" style="flex:0 0 auto;width:auto">${Object.entries(LOCKS)
-                   .sort((a, b) => (a[0] === "0" ? 1 : b[0] === "0" ? -1 : a[0] - b[0]))
-                   .map(([v, l]) => `<option value="${v}" ${String(s.lockMinutes) === v ? "selected" : ""}>${l}</option>`)
-                   .join("")}</select></label>
+            ? `<div class="row"><span class="ic">${ic("faceid")}</span><span class="l">Face ID is on<small>Works on any device using your iCloud Keychain</small></span></div>
+               <label class="row stack"><span class="ic">${ic("lock")}</span><span class="l">Ask for Face ID<small>Only when you come back to the app, never while you're using it</small></span>
+                 <select class="pick" id="lockSel" style="flex:1 1 100%;margin-top:6px;height:42px">${LOCKS.map(
+                   ([v, l]) => `<option value="${v}" ${Number(s.lockMinutes) === v ? "selected" : ""}>${l}</option>`
+                 ).join("")}</select></label>
                <button class="row danger" data-action="faceid-remove"><span class="l">Turn off Face ID</span></button>`
             : `<button class="row" data-action="faceid-setup"><span class="ic">${ic("faceid")}</span><span class="l">Set up Face ID<small>${
                 S.platformAuth ? "Unlock with a glance, sign back in without typing" : "Not available in this browser"
@@ -880,7 +1072,7 @@
       </div>
 
       <div class="group-title">Export</div>
-      <div class="group">
+      <div class="group rise" style="--i:3">
         <a class="row" href="${API}/export?type=payments"><span class="ic">${ic("download")}</span><span class="l">Payments CSV<small>Every payment, with status and paid date</small></span></a>
         <a class="row" href="${API}/export?type=clients"><span class="ic">${ic("download")}</span><span class="l">Clients CSV</span></a>
       </div>
@@ -898,43 +1090,106 @@
       <p class="note" style="justify-content:center">Tracking since 28 September 2026</p>`;
   }
 
-  // ---------- main render ----------
-  function render() {
-    if (!S.data) return;
-    const views = { month: viewMonth, calendar: viewCalendar, clients: viewClients, more: viewMore };
-    const tabs = [
-      ["month", "bars", "Month"],
-      ["calendar", "cal", "Calendar"],
-      ["add", "plus", ""],
-      ["clients", "users", "Clients"],
-      ["more", "more", "Settings"],
-    ];
-    const scrollY = window.scrollY;
-    const html = `<div class="app">
-      <main class="view${S.animate ? "" : " still"}" id="view" ${S.animate ? "" : 'style="animation:none"'}>${views[S.tab]()}</main>
-      <nav class="tabbar"><div class="tabbar-inner">${tabs
-        .map(([k, i, l]) =>
-          k === "add"
-            ? `<button class="tab add" data-action="add" aria-label="Add"><span>${ic(i)}</span></button>`
-            : `<button class="tab${S.tab === k ? " on" : ""}" data-tab="${k}">${ic(i)}<span>${l}</span></button>`
-        )
-        .join("")}</div></nav>
+  // ---------- shell + render ----------
+  const TABS = [
+    ["month", "bars", "Month"],
+    ["calendar", "cal", "Calendar"],
+    ["add", "plus", ""],
+    ["clients", "users", "Clients"],
+    ["more", "more", "Settings"],
+  ];
+  function renderShell() {
+    root().innerHTML = `<div class="app">
+      <div class="ptr" id="ptr"><div class="coin-logo">£</div></div>
+      <main class="view" id="view"></main>
+      <nav class="tabbar"><div class="tabbar-inner" id="tabs"><span class="tab-ind" id="tabInd"></span>${TABS.map(([k, i, l]) =>
+        k === "add"
+          ? `<button class="tab add" data-action="add" aria-label="Add"><span>${ic(i)}</span></button>`
+          : `<button class="tab" data-tab="${k}">${ic(i)}<span>${l}</span></button>`
+      ).join("")}</div></nav>
     </div>`;
-    root().innerHTML = html;
+  }
+  function moveTabIndicator(instant) {
+    const t = $(`.tab[data-tab="${S.tab}"]`);
+    const ind = $("#tabInd");
+    if (!t || !ind) return;
+    $$(".tab[data-tab]").forEach((x) => x.classList.toggle("on", x === t));
+    if (instant) ind.style.transition = "none";
+    ind.style.width = t.offsetWidth - 8 + "px";
+    ind.style.transform = `translateX(${t.offsetLeft + 4}px)`;
+    if (instant) {
+      void ind.offsetWidth;
+      ind.style.transition = "";
+    }
+  }
+  function layoutSegs() {
+    $$(".seg[data-seg]").forEach((seg) => {
+      const on = $("button.on", seg);
+      if (!on) return;
+      let th = $(".thumb", seg);
+      if (!th) {
+        th = document.createElement("span");
+        th.className = "thumb";
+        seg.prepend(th);
+      }
+      seg.classList.add("ready");
+      const x = on.offsetLeft;
+      const w = on.offsetWidth;
+      const key = seg.dataset.seg;
+      const prev = S.segPos[key];
+      if (prev && (prev.x !== x || prev.w !== w) && !reduced) {
+        th.style.transition = "none";
+        th.style.width = prev.w + "px";
+        th.style.transform = `translateX(${prev.x}px)`;
+        void th.offsetWidth;
+        th.style.transition = "";
+      }
+      th.style.width = w + "px";
+      th.style.transform = `translateX(${x}px)`;
+      S.segPos[key] = { x, w };
+    });
+  }
+
+  // mode: "fade" (tab change), "push"/"pop" (client profile), or undefined (data refresh, stay put)
+  function render(mode) {
+    if (!S.data) return;
+    let first = false;
+    if (!$("#view")) {
+      renderShell();
+      first = true;
+    }
+    const v = $("#view");
+    const y = window.scrollY;
+    const views = { month: viewMonth, calendar: viewCalendar, clients: viewClients, more: viewMore };
+    v.className = "view";
+    v.innerHTML = views[S.tab]();
+    if (mode) {
+      void v.offsetWidth;
+      v.className = `view ${mode} enter`;
+    }
+    moveTabIndicator(first);
     if (S.tab === "month") {
       renderList();
       const strip = $("#strip");
       const sel = $("#strip .sel");
       if (strip && sel) strip.scrollLeft = sel.offsetLeft - strip.clientWidth / 2 + sel.offsetWidth / 2;
     }
-    if (S.tab === "clients") renderClientList();
-    if (!S.animate) window.scrollTo(0, scrollY);
-    S.animate = false;
+    if (S.tab === "clients" && !S.clientId) renderClientList();
+    layoutSegs();
+    // progress bar + lime tile shimmer + counters
+    const fill = $(".progress .fill");
+    const prevRecv = S.counts.recv ?? 0;
+    requestAnimationFrame(() => {
+      if (fill) fill.style.width = fill.dataset.pct + "%";
+      const rt = $("#recvTile");
+      if (rt && Number($("[data-count=recv]", rt)?.dataset.val) > prevRecv) rt.classList.add("shine");
+      runCounts();
+    });
+    S.calAnim = "";
+    S.heroAnim = "";
+    if (!mode) window.scrollTo(0, y);
   }
-  const rerender = () => {
-    S.animate = false;
-    render();
-  };
+  const rerender = () => render();
 
   // ---------- sheets: payments ----------
   function clientOptions(sel) {
@@ -987,7 +1242,7 @@
             : sch
             ? `<div class="subcard"><h4>${sch.active ? `Repeats monthly on the ${ordinal(sch.day_of_month)}` : "Monthly repeat stopped"}</h4>${
                 sch.active
-                  ? `<div class="hint" style="padding:0">Changes here only affect this one payment.</div><div class="btn-row"><button type="button" class="btn sm ghost" data-sched-edit="${sch.id}" style="width:100%">Edit repeat</button><button type="button" class="btn sm danger" data-sched-stop="${sch.id}" style="width:100%">Stop repeating</button></div>`
+                  ? `<div class="hint" style="padding:0">Changes here only affect this one payment.</div><div class="btn-row"><button type="button" class="btn sm ghost" data-sched-edit="${sch.id}" style="width:100%">Edit repeat</button><button type="button" class="btn sm danger" id="p-sched-stop" style="width:100%">Stop repeating</button></div>`
                   : ""
               }</div>`
             : ""
@@ -1005,7 +1260,7 @@
         <button class="btn lime" type="submit">${isEdit ? "Save changes" : "Add payment"}</button>
         ${isEdit ? `<button class="btn danger" type="button" id="p-del">Delete this payment</button>` : ""}
       </form>`;
-    openSheet(isEdit ? "Edit payment" : "Add payment", html, (sh) => {
+    openSheet(isEdit ? `${cname(p)} · ${money(p.amount_pence)}` : "Add payment", html, (sh) => {
       const weeksF = $("#p-weeks-f", sh);
       $('[data-name="package"]', sh).addEventListener("change", (e) => {
         weeksF.hidden = e.currentTarget.dataset.value !== "programme";
@@ -1048,9 +1303,7 @@
             fail(e);
           }
         };
-        const se = $("[data-sched-edit]", sh);
-        if (se) se.onclick = () => scheduleSheet(sch);
-        const ss = $("[data-sched-stop]", sh);
+        const ss = $("#p-sched-stop", sh);
         if (ss) ss.onclick = () => stopSchedule(sch);
       }
       $("#payForm", sh).onsubmit = async (e) => {
@@ -1078,12 +1331,11 @@
         const btn = $("button[type=submit]", sh);
         btn.disabled = true;
         try {
-          const r = isEdit
-            ? await api(`/payments/${p.id}`, { method: "PUT", body })
-            : await api("/payments", { method: "POST", body });
+          const r = isEdit ? await api(`/payments/${p.id}`, { method: "PUT", body }) : await api("/payments", { method: "POST", body });
           setData(r.data);
           closeSheet();
           rerender();
+          haptic();
           toast(isEdit ? "Saved" : body.repeat ? "Payment added, repeating monthly" : "Payment added");
         } catch (e2) {
           btn.disabled = false;
@@ -1113,7 +1365,7 @@
         <button class="btn lime" type="submit">Save repeat</button>
         <button class="btn danger" type="button" id="s-stop">Stop repeating</button>
       </form>`;
-    openSheet("Edit monthly repeat", html, (sh) => {
+    openSheet("Monthly repeat", html, (sh) => {
       $('[data-name="package"]', sh).addEventListener("change", (e) => ($("#s-weeks-f", sh).hidden = e.currentTarget.dataset.value !== "programme"));
       $("#s-stop", sh).onclick = () => stopSchedule(sch);
       $("#schForm", sh).onsubmit = async (e) => {
@@ -1155,11 +1407,12 @@
 
   async function quickPay(id) {
     const p = S.data.payments.find((x) => x.id === id);
-    if (!p) return;
+    if (!p || p.paid_date) return;
     try {
       const r = await api(`/payments/${id}/paid`, { method: "POST", body: { paid_date: londonToday() } });
       setData(r.data);
       rerender();
+      $$(`.swipe[data-pid="${id}"] .prow`).forEach((row) => row.classList.add("just-paid"));
       toast(`${cname(p)} · ${money(p.amount_pence)} paid today`, [
         { label: "Change date", fn: () => paidDateSheet(id) },
         {
@@ -1177,6 +1430,7 @@
       ]);
     } catch (e) {
       fail(e);
+      rerender();
     }
   }
 
@@ -1208,22 +1462,14 @@
   }
 
   // ---------- sheets: clients ----------
+  // Used for "Add client" and for "Edit details" from a profile. Title and button make the mode obvious.
   function clientSheet(c) {
     const isEdit = !!c;
     const f = c || { name: "", tenure: "new", package: "coaching", programme_weeks: null, price_pence: null, method: "manual", status: "active", notes: "" };
-    const today = londonToday();
-    const history = isEdit
-      ? S.data.payments.filter((p) => p.client_id === c.id).sort((a, b) => (a.due_date < b.due_date ? 1 : a.due_date > b.due_date ? -1 : b.id - a.id))
-      : [];
-    const owes = isEdit ? clientOwes(c.id) : [];
+    const hasPayments = isEdit && clientPayments(c.id).length > 0;
     const hasRepeat = isEdit && S.data.schedules.some((s) => s.client_id === c.id && s.active);
     const html = `
       <form class="form" id="cForm" novalidate>
-        ${
-          owes.length
-            ? `<div class="status-card overdue"><div class="l"><b>Owes ${money(sum(owes))}</b><small>${plural(owes.length, "payment")} overdue</small></div></div>`
-            : ""
-        }
         <div class="field"><label for="c-name">Name</label><input id="c-name" value="${esc(f.name)}" autocomplete="off" autocapitalize="words" placeholder="Client name"></div>
         <div class="field"><span class="lab">Tenure</span>${opts("tenure", TEN, f.tenure)}</div>
         <div class="field"><span class="lab">Package</span>${opts("package", { pt: "PT only", coaching: "Full coaching", programme: "Programme only" }, f.package)}</div>
@@ -1245,32 +1491,12 @@
               </div>`
         }
         <div class="field"><label for="c-notes">Notes <span>optional</span></label><textarea id="c-notes" rows="2" placeholder="Arrangements, reminders, anything useful">${esc(f.notes)}</textarea></div>
-        ${isEdit ? `<p class="hint">Changing their package or price won't rewrite past payments.${hasRepeat ? " To change the monthly amount, edit one of their repeating payments." : ""}</p>` : ""}
+        ${isEdit ? `<p class="hint">Changing their package or price won't rewrite past payments.${hasRepeat ? " To change the monthly amount, tap their repeat on the profile." : ""}</p>` : ""}
         <div class="form-err" id="c-err"></div>
-        <button class="btn lime" type="submit">${isEdit ? "Save client" : "Add client"}</button>
-      </form>
-      ${
-        isEdit
-          ? `<div class="section-head" style="margin-top:24px"><h2 style="font-size:18px">Payments</h2><button class="btn sm" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add</button></div>
-             ${
-               history.length
-                 ? `<div class="history">${history
-                     .map(
-                       (p) => `<button class="hrow" data-open-pay="${p.id}"><span class="d">${fmtShort(p.due_date)}<small>${esc(pkgText(p.package, p.programme_weeks))}${
-                         schedActive(p.schedule_id) ? " · repeats" : ""
-                       }</small></span><b class="num">${money(p.amount_pence)}</b>${pill(p)}</button>`
-                     )
-                     .join("")}</div>`
-                 : `<p class="hint">No payments yet.</p>`
-             }
-             ${
-               history.length
-                 ? ""
-                 : `<button class="btn danger" type="button" id="c-del" style="margin-top:16px">Delete client</button>`
-             }`
-          : ""
-      }`;
-    openSheet(isEdit ? c.name : "Add client", html, (sh) => {
+        <button class="btn lime" type="submit">${isEdit ? "Save changes" : "Add client"}</button>
+        ${isEdit && !hasPayments ? `<button class="btn danger" type="button" id="c-del">Delete client</button>` : ""}
+      </form>`;
+    openSheet(isEdit ? "Edit client details" : "New client", html, (sh) => {
       const pkg = $('[data-name="package"]', sh);
       pkg.addEventListener("change", () => {
         $("#c-weeks-f", sh).hidden = pkg.dataset.value !== "programme";
@@ -1287,7 +1513,8 @@
             const r = await api(`/clients/${c.id}`, { method: "DELETE" });
             setData(r.data);
             closeSheet();
-            rerender();
+            S.clientId = null;
+            render("pop");
             toast("Client deleted");
           } catch (e) {
             fail(e);
@@ -1311,6 +1538,8 @@
         if (body.price_pence == null) return (err.textContent = "Enter the agreed price in pounds, e.g. 160.");
         if (body.package === "programme" && !body.programme_weeks) return (err.textContent = "Pick the programme length.");
         if (!isEdit) {
+          const dup = S.data.clients.find((x) => x.name.trim().toLowerCase() === body.name.toLowerCase());
+          if (dup && !confirm(`You already have a client called ${dup.name}. Add another one anyway?`)) return;
           const d = $("#c-next", sh).value;
           if (d) body.next = { due_date: d, repeat: $("#c-repeat", sh).checked };
         }
@@ -1323,8 +1552,15 @@
           const r = isEdit ? await api(`/clients/${c.id}`, { method: "PUT", body }) : await api("/clients", { method: "POST", body });
           setData(r.data);
           closeSheet();
-          rerender();
-          toast(isEdit ? "Client saved" : body.next ? `${body.name} added with their next payment` : `${body.name} added`);
+          haptic();
+          if (!isEdit) {
+            // take you straight to the new client's profile
+            S.tab = "clients";
+            S.clientId = r.id;
+            render("push");
+            window.scrollTo(0, 0);
+          } else rerender();
+          toast(isEdit ? "Changes saved" : body.next ? `${body.name} added with their next payment` : `${body.name} added`);
         } catch (e2) {
           btn.disabled = false;
           if (!e2.silent) err.textContent = e2.message;
@@ -1333,11 +1569,28 @@
     });
   }
 
+  async function setClientStatus(c, to) {
+    const hasRepeat = S.data.schedules.some((s) => s.client_id === c.id && s.active);
+    if (to !== "active" && hasRepeat && !confirm(`Pause ${c.name}? Their monthly repeat stops for now and upcoming unpaid repeats are removed. Anything already due stays.`)) return;
+    try {
+      const body = { ...c, status: to };
+      const r = await api(`/clients/${c.id}`, { method: "PUT", body });
+      setData(r.data);
+      haptic();
+      rerender();
+      toast(to === "active" ? `${c.name} is active again` : `${c.name} paused`);
+    } catch (e) {
+      fail(e);
+    }
+  }
+
   function addSheet() {
     openSheet(
       "Add",
       `<div class="action-list">
-        <button class="action" data-action="add-payment"><span class="ic">${ic("receipt")}</span><span><b>Add payment</b><small>One-off or repeating monthly</small></span></button>
+        <button class="action" data-action="add-payment"${S.tab === "clients" && S.clientId ? ` data-client="${S.clientId}"` : ""}${
+        S.tab === "calendar" && S.calDay ? ` data-date="${S.calDay}"` : ""
+      }><span class="ic">${ic("receipt")}</span><span><b>Add payment</b><small>One-off or repeating monthly</small></span></button>
         <button class="action" data-action="add-client"><span class="ic">${ic("userplus")}</span><span><b>Add client</b><small>With their next payment if you like</small></span></button>
       </div>`
     );
@@ -1350,6 +1603,7 @@
       await passkeyRegister();
       S.session = await api("/session");
       rerender();
+      haptic();
       toast("Face ID is on");
     } catch (e) {
       if (e.name === "InvalidStateError") toast("Face ID is already set up on this device.");
@@ -1414,14 +1668,23 @@
 
   // ---------- navigation ----------
   function goTab(t) {
+    const tabBtn = $(`.tab[data-tab="${t}"]`);
+    if (tabBtn) {
+      tabBtn.classList.remove("bounce");
+      void tabBtn.offsetWidth;
+      tabBtn.classList.add("bounce");
+    }
     if (t === S.tab) {
+      if (t === "clients" && S.clientId) {
+        S.clientId = null;
+        render("pop");
+        return;
+      }
       window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
     S.tab = t;
-    setPref("tab", t);
-    S.animate = true;
-    render();
+    render("fade");
     window.scrollTo(0, 0);
   }
   function setCalMonth(mk) {
@@ -1430,25 +1693,53 @@
     if (mKey(today) === mk) S.calDay = today;
     else {
       const field = S.calMode === "due" ? "due_date" : "paid_date";
-      const first = S.data.payments
-        .map((p) => p[field])
-        .filter((d) => d && mKey(d) === mk)
-        .sort()[0];
+      const first = S.data.payments.map((p) => p[field]).filter((d) => d && mKey(d) === mk).sort()[0];
       S.calDay = first || mk + "-01";
     }
   }
+  function shiftMonth(dir) {
+    const range = monthRange();
+    const i = range.indexOf(S.month) + dir;
+    if (i < 0 || i >= range.length) return false;
+    S.month = range[i];
+    S.heroAnim = dir > 0 ? "from-right" : "from-left";
+    render();
+    return true;
+  }
+  function shiftCal(dir) {
+    setCalMonth(addMonths(S.calMonth, dir));
+    S.calAnim = dir > 0 ? "from-right" : "from-left";
+    render();
+  }
 
   document.addEventListener("click", (e) => {
+    if (S.suppressClick) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     const t = e.target.closest(
-      "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus]"
+      "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-sched-edit],[data-theme-set]"
     );
     if (!t || t.disabled) return;
     const d = t.dataset;
     if (d.pay) {
       e.stopPropagation();
+      haptic();
+      const r = t.getBoundingClientRect();
+      burst(r.left + r.width / 2, r.top + r.height / 2);
       return quickPay(Number(d.pay));
     }
     if (d.tab) return goTab(d.tab);
+    if (d.schedEdit) {
+      const s = S.smap.get(Number(d.schedEdit));
+      if (s) scheduleSheet(s);
+      return;
+    }
+    if (d.themeSet) {
+      setTheme(d.themeSet);
+      return rerender();
+    }
     if (d.action) {
       switch (d.action) {
         case "add":
@@ -1457,6 +1748,18 @@
           return paymentSheet(null, { due_date: d.date, client_id: d.client ? Number(d.client) : null });
         case "add-client":
           return clientSheet(null);
+        case "edit-client": {
+          const c = client(Number(d.client));
+          return c && clientSheet(c);
+        }
+        case "client-status": {
+          const c = client(Number(d.client));
+          return c && setClientStatus(c, d.to);
+        }
+        case "back":
+          S.clientId = null;
+          render("pop");
+          return;
         case "faceid-setup":
           return setupFaceId();
         case "faceid-remove":
@@ -1481,19 +1784,21 @@
     }
     if (d.month !== undefined) {
       if (!d.month) return;
+      const dir = d.month > S.month ? 1 : -1;
+      if (d.month === S.month) return;
       S.month = d.month;
+      S.heroAnim = dir > 0 ? "from-right" : "from-left";
       return rerender();
     }
     if (d.scope) {
       S.scope = d.scope;
       if (d.status) S.fStatus = d.status;
+      rerender();
       if (t.classList.contains("tile") || t.classList.contains("banner")) {
-        rerender();
         const el = $(".section-head");
         if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
-        return;
       }
-      return rerender();
+      return;
     }
     if (d.openPay) {
       const p = S.data.payments.find((x) => x.id === Number(d.openPay));
@@ -1501,8 +1806,9 @@
       return;
     }
     if (d.openClient) {
-      const c = client(Number(d.openClient));
-      if (c) clientSheet(c);
+      S.clientId = Number(d.openClient);
+      render("push");
+      window.scrollTo(0, 0);
       return;
     }
     if (d.day) {
@@ -1510,9 +1816,14 @@
       return rerender();
     }
     if (d.cal) {
-      const today = londonToday();
-      setCalMonth(d.cal === "today" ? mKey(today) : addMonths(S.calMonth, d.cal === "prev" ? -1 : 1));
-      return rerender();
+      if (d.cal === "today") {
+        const tk = mKey(londonToday());
+        const dir = tk > S.calMonth ? 1 : -1;
+        setCalMonth(tk);
+        S.calAnim = dir > 0 ? "from-right" : "from-left";
+        return rerender();
+      }
+      return shiftCal(d.cal === "prev" ? -1 : 1);
     }
     if (d.calmode) {
       S.calMode = d.calmode;
@@ -1527,7 +1838,8 @@
       S.cStatus = d.cstatus;
       return rerender();
     }
-  });
+  }, true);
+
   document.addEventListener("keydown", (e) => {
     if ((e.key === "Enter" || e.key === " ") && e.target.matches(".prow[data-open-pay]")) {
       e.preventDefault();
@@ -1558,16 +1870,160 @@
       try {
         await api("/settings", { method: "POST", body: { lockMinutes: Number(e.target.value) } });
         S.session = await api("/session");
-        toast("Lock setting saved");
+        toast("Saved");
       } catch (err) {
         fail(err);
       }
     }
   });
 
-  // Coming back to the app: re-check lock + refresh numbers (dates may have rolled over).
+  // ---------- touch: swipe-to-pay, month swipes, pull to refresh, edge-swipe back ----------
+  let T = null;
+  document.addEventListener(
+    "touchstart",
+    (e) => {
+      if (sheet || !S.data || S.locked || e.touches.length > 1) return;
+      const t = e.touches[0];
+      const tgt = e.target;
+      T = {
+        x0: t.clientX,
+        y0: t.clientY,
+        dx: 0,
+        dy: 0,
+        mode: null,
+        row: tgt.closest(".swipe > .prow") && tgt.closest(".swipe").querySelector(".swipe-bg") ? tgt.closest(".swipe > .prow") : null,
+        pan: tgt.closest("#hero, #calCard"),
+        edge: t.clientX < 28 && S.tab === "clients" && S.clientId,
+        top: window.scrollY <= 0,
+        noPull: !!tgt.closest(".strip, .table-wrap, .tabbar"),
+      };
+    },
+    { passive: true }
+  );
+  document.addEventListener(
+    "touchmove",
+    (e) => {
+      if (!T) return;
+      const t = e.touches[0];
+      T.dx = t.clientX - T.x0;
+      T.dy = t.clientY - T.y0;
+      if (!T.mode) {
+        const ax = Math.abs(T.dx);
+        const ay = Math.abs(T.dy);
+        if (ax > 8 && ax > ay * 1.2) T.mode = T.edge && T.dx > 0 ? "back" : T.row ? "row" : T.pan ? "pan" : "none";
+        else if (T.dy > 8 && ay > ax && T.top && window.scrollY <= 0 && !T.noPull && S.tab !== "more") T.mode = "ptr";
+        else if (ay > 8) T.mode = "none";
+        if (!T.mode) return;
+      }
+      if (T.mode === "none") return;
+      e.preventDefault();
+      if (T.mode === "row") {
+        const d = Math.min(0, T.dx);
+        const eased = d < -110 ? -110 + (d + 110) * 0.35 : d;
+        const bg = T.row.previousElementSibling;
+        T.row.classList.add("dragging");
+        T.row.classList.remove("snap");
+        T.row.style.transform = `translateX(${eased}px)`;
+        bg.style.opacity = Math.min(1, -d / 50);
+        const armed = d < -90;
+        if (armed !== T.armed) {
+          T.armed = armed;
+          bg.classList.toggle("armed", armed);
+          if (armed) haptic();
+        }
+      } else if (T.mode === "pan") {
+        const target = T.pan.id === "calCard" ? $("#calGrid") : T.pan;
+        target.style.transition = "none";
+        target.style.transform = `translateX(${T.dx * 0.35}px)`;
+        target.style.opacity = String(1 - Math.min(0.5, Math.abs(T.dx) / 400));
+      } else if (T.mode === "back") {
+        const v = $("#view");
+        v.style.transition = "none";
+        v.style.transform = `translateX(${Math.max(0, T.dx) * 0.6}px)`;
+      } else if (T.mode === "ptr") {
+        const y = Math.min(T.dy * 0.5, 100);
+        const ptr = $("#ptr");
+        ptr.classList.add("show");
+        ptr.style.transition = "none";
+        ptr.style.transform = `translate(-50%, ${y - 60}px)`;
+        $(".coin-logo", ptr).style.transform = `rotateY(${T.dy * 2}deg)`;
+        if (y > 64 && !T.armed) {
+          T.armed = true;
+          haptic();
+        } else if (y <= 64) T.armed = false;
+      }
+    },
+    { passive: false }
+  );
+  document.addEventListener("touchend", async () => {
+    if (!T) return;
+    const s = T;
+    T = null;
+    if (!s.mode || s.mode === "none") return;
+    S.suppressClick = true;
+    setTimeout(() => (S.suppressClick = false), 350);
+    if (s.mode === "row") {
+      s.row.classList.remove("dragging");
+      s.row.classList.add("snap");
+      const bg = s.row.previousElementSibling;
+      if (s.armed) {
+        s.row.style.transform = "translateX(-110%)";
+        const r = bg.getBoundingClientRect();
+        burst(r.right - 40, r.top + r.height / 2);
+        setTimeout(() => quickPay(Number(s.row.dataset.openPay)), 200);
+      } else {
+        s.row.style.transform = "";
+        bg.style.opacity = 0;
+      }
+    } else if (s.mode === "pan") {
+      const target = s.pan.id === "calCard" ? $("#calGrid") : s.pan;
+      target.style.transition = "";
+      target.style.transform = "";
+      target.style.opacity = "";
+      if (Math.abs(s.dx) > 60) {
+        haptic();
+        if (s.pan.id === "calCard") shiftCal(s.dx < 0 ? 1 : -1);
+        else shiftMonth(s.dx < 0 ? 1 : -1);
+      }
+    } else if (s.mode === "back") {
+      const v = $("#view");
+      v.style.transition = "transform .25s var(--ease)";
+      v.style.transform = "";
+      setTimeout(() => (v.style.transition = ""), 260);
+      if (s.dx > 90) {
+        S.clientId = null;
+        render("pop");
+      }
+    } else if (s.mode === "ptr") {
+      const ptr = $("#ptr");
+      const coin = $(".coin-logo", ptr);
+      ptr.style.transition = "transform .35s var(--spring)";
+      coin.style.transform = "";
+      if (s.armed) {
+        ptr.style.transform = "translate(-50%, 8px)";
+        ptr.classList.add("spin");
+        try {
+          const [d] = await Promise.all([api("/data"), new Promise((r) => setTimeout(r, 600))]);
+          setData(d);
+          render();
+        } catch (e) {
+          fail(e);
+        }
+        ptr.classList.remove("spin");
+      }
+      ptr.style.transform = "";
+      setTimeout(() => ptr.classList.remove("show"), 250);
+    }
+  });
+  document.addEventListener("touchcancel", () => (T = null));
+
+  // ---------- lifecycle: lock on return, keep alive while open ----------
   document.addEventListener("visibilitychange", async () => {
-    if (document.visibilityState !== "visible" || !S.data) return;
+    if (document.visibilityState === "hidden") return markHidden();
+    if (!S.data) return;
+    if (S.locked) return;
+    if (awayTooLong()) return renderLock();
+    setPref("hiddenAt", "0");
     if (Date.now() - S.lastSync < 15000) return;
     try {
       const s = await api("/session", { raw: true });
@@ -1578,6 +2034,19 @@
       if (!sheet) rerender();
     } catch {}
   });
+  window.addEventListener("pagehide", markHidden);
+  setInterval(async () => {
+    if (document.visibilityState !== "visible" || !S.data || S.locked || !S.session?.hasPasskey) return;
+    try {
+      const s = await api("/session", { raw: true });
+      if (s.authed && s.locked) renderLock();
+    } catch {}
+  }, 30000);
+  window.addEventListener("resize", () => {
+    moveTabIndicator(true);
+    S.segPos = {};
+    layoutSegs();
+  });
 
   // ---------- boot ----------
   async function boot() {
@@ -1586,21 +2055,24 @@
       S.session = s;
       if (!s.hasUser) return renderSetup();
       if (!s.authed) return renderLogin();
-      if (s.locked) return renderLock();
+      if (s.locked || awayTooLong()) return renderLock();
+      S.locked = false;
+      setPref("hiddenAt", "0");
       setData(await api("/data"));
       const today = londonToday();
       if (!S.month) S.month = mKey(today) < mKey(TRACK_START) ? mKey(TRACK_START) : mKey(today);
       if (!S.calMonth) setCalMonth(S.month);
-      S.animate = true;
-      render();
+      root().innerHTML = "";
+      render("fade");
     } catch (e) {
       if (e.silent) return;
-      root().innerHTML = `<div class="lock-screen"><div class="coin-logo big" style="animation:none">£</div><h1>Can't connect</h1><p>${esc(e.message)}</p><button class="btn lime" id="retry">Try again</button></div>`;
+      root().innerHTML = `<div class="lock-screen"><div class="coin-logo big">£</div><h1>Can't connect</h1><p>${esc(e.message)}</p><button class="btn lime" id="retry">Try again</button></div>`;
       $("#retry").onclick = boot;
     }
   }
 
   (async () => {
+    applyTheme(pref("theme", "system"));
     try {
       if (window.PublicKeyCredential && PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable) {
         S.platformAuth = await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();

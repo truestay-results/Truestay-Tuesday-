@@ -5,7 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>TrueStay Pay</title>
 <meta name="robots" content="noindex, nofollow">
-<meta name="theme-color" content="#E3E8E5">
+<meta name="theme-color" content="#E8EBE8" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0E0F0D" media="(prefers-color-scheme: dark)">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
@@ -17,7 +18,11 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="app.css?v=1">
+<link rel="stylesheet" href="app.css?v=2">
+<script>
+  // apply saved theme before first paint so dark mode never flashes light
+  try { var t = localStorage.getItem("tsp.theme"); if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; } catch (e) {}
+</script>
 </head>
 <body>
 <div id="root">
@@ -25,6 +30,6 @@
 </div>
 <div id="sheet-root"></div>
 <div id="toast" role="status" aria-live="polite"></div>
-<script src="app.js?v=1"></script>
+<script src="app.js?v=2"></script>
 </body>
 </html>
