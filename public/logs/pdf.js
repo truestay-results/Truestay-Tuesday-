@@ -276,17 +276,17 @@
     tiles.push({
       k: "Average calories",
       v: aK == null ? "No data" : `${fmt(aK)} kcal`,
-      s: T.kcal ? `Target ${fmt(T.kcal)} · on target ${countHits("kcal", hitK)} of ${nDays}` : aK == null ? "Nothing read yet" : `Across ${col("kcal").length} of ${nDays} days`,
+      s: T.kcal ? `Target ${fmt(T.kcal)} · hit ${countHits("kcal", hitK)}/${nDays}` : aK == null ? "Nothing read yet" : `Across ${col("kcal").length} of ${nDays} days`,
     });
     tiles.push({
       k: "Average protein",
       v: aP == null ? "No data" : `${fmt(aP)} g`,
-      s: T.protein ? `Target ${fmt(T.protein)} g · hit ${countHits("protein", hitP)} of ${nDays}` : aP == null ? "Nothing read yet" : `Across ${col("protein").length} of ${nDays} days`,
+      s: T.protein ? `Target ${fmt(T.protein)} g · hit ${countHits("protein", hitP)}/${nDays}` : aP == null ? "Nothing read yet" : `Across ${col("protein").length} of ${nDays} days`,
     });
     tiles.push({
       k: "Average steps",
       v: aS == null ? "No data" : fmt(aS),
-      s: T.steps ? `Target ${fmt(T.steps)} · hit ${countHits("steps", hitS)} of ${nDays}` : aS == null ? "Nothing read yet" : `Across ${col("steps").length} of ${nDays} days`,
+      s: T.steps ? `Target ${fmt(T.steps)} · hit ${countHits("steps", hitS)}/${nDays}` : aS == null ? "Nothing read yet" : `Across ${col("steps").length} of ${nDays} days`,
     });
     const logged = days.filter((x) => x.items.length).length;
     tiles.push({ k: "Days logged", v: `${logged} of ${nDays}`, s: `${shots} screenshot${shots === 1 ? "" : "s"}` });

@@ -34,7 +34,7 @@
       .join("")
       .toUpperCase() || "?";
   const fmtN = (v) => (v == null ? "" : Math.round(v).toLocaleString("en-GB"));
-  const mb = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1)} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
+  const mb = (b) => (b >= 1048576 ? `${(b / 1048576).toFixed(1).replace(/\.0$/, "")} MB` : `${Math.max(1, Math.round(b / 1024))} KB`);
 
   // ---------- dates (UK) ----------
   const UKF = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
@@ -48,7 +48,11 @@
     d.setUTCDate(d.getUTCDate() + n);
     return d.toISOString().slice(0, 10);
   };
-  const validISO = (s) => /^\d{4}-\d{2}-\d{2}$/.test(s) && new Date(s + "T12:00:00Z").toISOString().slice(0, 10) === s;
+  const validISO = (s) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+    const d = new Date(s + "T12:00:00Z");
+    return !isNaN(d) && d.toISOString().slice(0, 10) === s;
+  };
   const MON = ["Jan", "Feb", "Mar", "Apr", "May", "June", "July", "Aug", "Sept", "Oct", "Nov", "Dec"];
   const WD = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   const WD_LONG = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
@@ -293,8 +297,9 @@
   function withYear(s, refT) {
     const ref = ukParts(refT).date;
     let iso = null;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) iso = s;
-    else if (/^\d{2}-\d{2}$/.test(s)) {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s) && validISO(s) && Math.abs(daysBetween(s, ref)) <= 60) iso = s;
+    else if (/^\d{4}-\d{2}-\d{2}$/.test(s)) s = s.slice(5);
+    if (!iso && /^\d{2}-\d{2}$/.test(s)) {
       const y = +ref.slice(0, 4);
       iso = `${y}-${s}`;
       if (validISO(iso) && iso > addDays(ref, 2)) iso = `${y - 1}-${s}`;
@@ -320,8 +325,9 @@
     if (ref.src !== "sentday") {
       const m = String(r.clock || "").match(/^(\d{2}):(\d{2})$/);
       const clock = m ? +m[1] * 60 + +m[2] : null;
-      // screenshot taken later in the day than it was sent or shared, so it was taken on an earlier day
-      if (clock != null && clock > p.min + 5) day = addDays(day, -1);
+      // screenshot clock well after the time it was sent or shared (more than 3 hours, so a client abroad
+      // doesn't count), so it was taken on an earlier day
+      if (clock != null && clock > p.min + 180) day = addDays(day, -1);
       // sent in the small hours with no clock to go on: last night's log
       else if (clock == null && p.hour < 4) day = addDays(day, -1);
     }
@@ -337,7 +343,14 @@
   }
   function recompute() {
     const sizes = sessionSizes(S.data.items);
-    S.eff = new Map(S.data.items.map((it) => [it.id, effDay(it, sizes)]));
+    const safe = (it) => {
+      try {
+        return effDay(it, sizes);
+      } catch {
+        return { day: it.day_src === "manual" ? it.day : null, src: it.day_src === "manual" ? "manual" : null };
+      }
+    };
+    S.eff = new Map(S.data.items.map((it) => [it.id, safe(it)]));
   }
 
   // ---------- grouping ----------
@@ -406,6 +419,7 @@
     return JSON.stringify([S.view, S.clientId, S.sel ? [...S.sel] : 0, S.up && [S.up.done, S.up.total], S.data.key ? 1 : 0, S.data.items.map((i) => [i.id, i.status, i.client_id, i.day, i.kind, i.kcal, i.protein, i.carbs, i.fat, i.steps, i.filed_at]), S.data.targets]);
   }
 
+  const imgUrl = (it) => `${API}/logs/img/${it.id}?v=${encodeURIComponent(it.v || it.id)}`;
   const TAGK = { food: "Food", steps: "Steps", food_steps: "Food, steps", weight: "Weight", other: "Other" };
   const thumbTag = (it) => {
     if (it.status === "new") return `<span class="tag">Reading…</span>`;
@@ -420,7 +434,7 @@
     const reading = it.status === "new" || S.reading.has(it.id);
     const label = `${KIND[it.kind] || "Screenshot"}${S.eff.get(it.id)?.day ? ", " + dayLabel(S.eff.get(it.id).day) : ""}`;
     return `<button class="thumb${sel ? " sel" : ""}" data-item="${it.id}" aria-label="${esc(label)}"${S.sel ? ` aria-pressed="${sel}"` : ""}>
-      <img src="${API}/logs/img/${it.id}" loading="lazy" decoding="async" alt="">
+      <img src="${imgUrl(it)}" loading="lazy" decoding="async" alt="">
       ${thumbTag(it)}${reading ? `<span class="state"><i></i></span>` : ""}${S.sel ? `<span class="check">${ic("check")}</span>` : ""}
     </button>`;
   }
@@ -635,7 +649,9 @@
         </div>
       </div></div>
       <div class="group-title">Storage</div>
-      <div class="group"><div class="row"><span class="ic">${ic("image")}</span><span class="l">${plural(u.count, "screenshot")} held, ${mb(u.bytes)}<small>Deleted ${S.data.keep.filedDays} days after they go in a PDF, and after ${S.data.keep.anyDays} days either way.</small></span></div></div>
+      <div class="group"><div class="row"><span class="ic">${ic("image")}</span><span class="l">${plural(u.count, "screenshot")} held, ${mb(u.stored || u.bytes)} of ${mb(u.limit || 524288000)}<small${
+        u.limit && u.stored > u.limit * 0.7 ? ' class="warn" style="color:var(--amber-ink)"' : ""
+      }>${u.limit && u.stored > u.limit * 0.7 ? "Getting full. Make PDFs and tap Done with these, so older ones get cleared. " : ""}Deleted ${S.data.keep.filedDays} days after they go in a PDF, and after ${S.data.keep.anyDays} days either way.</small></span></div></div>
       <div class="group-title">Account</div>
       <div class="group">
         <div class="row"><span class="ic">${ic("user")}</span><span class="l">${esc(S.session?.email || "")}<small>Same sign in as TrueStay Pay</small></span></div>
@@ -662,7 +678,7 @@
     openSheet(
       e.day ? dayLabel(e.day) : "Screenshot",
       `<div class="form">
-        <div class="shot"><img src="${API}/logs/img/${it.id}" alt="Screenshot"></div>
+        <div class="shot"><img src="${imgUrl(it)}" alt="Screenshot"></div>
         ${status}
         <form class="form" id="itForm">
           <div class="field"><label for="it-day">Day it's for</label><input id="it-day" name="day" type="date" value="${e.day || ""}">
@@ -1021,7 +1037,7 @@
   // ---------- PDF ----------
   async function pdfImage(it) {
     try {
-      const res = await fetch(`${API}/logs/img/${it.id}`, { credentials: "same-origin" });
+      const res = await fetch(imgUrl(it), { credentials: "same-origin" });
       if (!res.ok) return null;
       const { blob, w, h } = await toJpeg(await res.blob(), PDF_IMG_W, 0.82);
       return { bytes: new Uint8Array(await blob.arrayBuffer()), w, h };
@@ -1419,7 +1435,7 @@
     };
     const sum = () => {
       const n = sel().length;
-      $("#im-sum", sh).textContent = n ? `${plural(n, "picture")} to look at. Anything already in Logs is skipped.` : "Nothing in those dates.";
+      $("#im-sum", sh).textContent = n ? `${plural(n, "picture")} to look at. Screenshots already in Logs are spotted and left out.` : "Nothing in those dates.";
       $("#im-go", sh).disabled = !n || !$("#im-client", sh).value;
       $("#im-go", sh).textContent = $("#im-client", sh).value ? `Import ${n || ""}`.trim() : "Pick the client first";
     };
@@ -1540,9 +1556,11 @@
           <div class="step"><div>Add <b>Split Text</b>, and set it to split by <b>New Lines</b>.</div></div>
           <div class="step"><div>Add <b>Choose from List</b>. Tap Show More and set the prompt to <b>Who are these for?</b></div></div>
           <div class="step"><div>Add <b>Repeat with Each</b>, and make it repeat with <b>Shortcut Input</b>.</div></div>
-          <div class="step"><div>Inside the repeat, add another <b>Get Contents of URL</b> with this link:${box(uploadUrl, "u")}
-            <div class="sub" style="margin-top:8px">Tap Show More. Set Method to <b>POST</b> and Request Body to <b>Form</b>. Add a <b>Text</b> field called <b>client</b> set to <b>Chosen Item</b>, and a <b>File</b> field called <b>photo</b> set to <b>Repeat Item</b>.</div></div></div>
-          <div class="step"><div>Under <b>End Repeat</b>, add <b>Show Notification</b> and set its text to <b>Contents of URL</b>. That tells you it worked.</div></div>
+          <div class="step"><div>Inside the repeat, add <b>Convert Image</b> and set it to convert <b>Repeat Item</b> to <b>JPEG</b>. That keeps them small.</div></div>
+          <div class="step"><div>Still inside the repeat, add another <b>Get Contents of URL</b> with this link:${box(uploadUrl, "u")}
+            <div class="sub" style="margin-top:8px">Tap Show More. Set Method to <b>POST</b> and Request Body to <b>Form</b>. Add a <b>Text</b> field called <b>client</b> set to <b>Chosen Item</b>, and a <b>File</b> field called <b>photo</b> set to <b>Converted Image</b>.</div>
+            <div class="sub" style="margin-top:6px">Optional, helps with dates: add a <b>Text</b> field called <b>name</b>, set it to <b>Repeat Item</b>, tap that and pick <b>Name</b>.</div></div></div>
+          <div class="step"><div>Under <b>End Repeat</b>, add <b>Show Notification</b> and set its text to <b>Contents of URL</b> (the one from the step above). That tells you it worked.</div></div>
           <div class="step"><div>Try it: in a client's WhatsApp chat, press and hold a screenshot, tap <b>Share</b>, pick <b>Send to Logs</b>, then the client.
             <div class="sub">For lots at once, open the chat's Media, tap Select, tick them, then Share.</div></div></div>
         </div>

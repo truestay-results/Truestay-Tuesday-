@@ -35,4 +35,4 @@ Clients' nightly food and step screenshots, read automatically and sorted into o
   - Import a WhatsApp chat: the Export Chat zip is opened on the phone, and each picture keeps the date and time it was sent
 - Reading: Workers AI (binding `AI`), vision models listed at the top of `src/logs.js`. It reads the kind of screen, any date on it, the status bar clock, calories, protein, carbs, fat, steps and a few extras
 - Which day a screenshot is for: worked out in `effDay` in `public/logs/app.js`, from a date on the screenshot, then when it was sent, then when it was shared. Anything it can't place goes in "Needs a day"
-- Data: D1 database `truestay-logs` (binding `LOGS_DB`). Pictures are kept as base64 in parts under 1 MB and deleted 14 days after they go in a PDF (90 days at most) by the hourly cron
+- Data: D1 database `truestay-logs` (binding `LOGS_DB`). Pictures are kept as base64 in parts under 1 MB and deleted 14 days after they go in a PDF (60 days at most) by the hourly cron. Repeats (the same screen arriving a second way) are spotted after reading and dropped

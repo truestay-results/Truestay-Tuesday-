@@ -18,9 +18,11 @@
 import { HttpError, bad, nowS, text, isDate } from "./pay-util.js";
 
 const PART = 1_000_000; // base64 characters per stored part (D1 rows max out at 2 MB)
-const MAX_BYTES = 10 * 1024 * 1024;
+const MAX_BYTES = 10 * 1024 * 1024; // app uploads (already resized on the phone)
+const MAX_SHARE_BYTES = 6 * 1024 * 1024; // share button uploads (keeps the Worker well inside its CPU limit)
 const KEEP_FILED_DAYS = 14;
-const KEEP_ANY_DAYS = 90;
+const KEEP_ANY_DAYS = 60;
+const DB_LIMIT = 500 * 1024 * 1024; // D1 database size on the Free plan
 const SORT_LATER = "Sort later";
 const KINDS = ["food", "steps", "food_steps", "weight", "other"];
 
@@ -218,19 +220,31 @@ async function clientsFromPay(env) {
   }
 }
 
-export async function storeImage(env, { b64, clientId, clientName, source, name, lastModified }) {
+export async function storeImage(env, { bytes, b64, clientId, clientName, source, name, lastModified }) {
   const db = env.LOGS_DB;
-  if (!b64 || typeof b64 !== "string") bad("No picture came through");
-  b64 = b64.replace(/^data:[^,]*,/, "").replace(/\s+/g, "");
-  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64.slice(0, 200)) || b64.length < 100) bad("That file isn't a picture");
-  const info = imageInfo(fromB64(b64.slice(0, 87380)));
+  let head;
+  let size;
+  let sha;
+  if (bytes) {
+    // share button: raw bytes. Hash the bytes (fast) and encode once.
+    if (bytes.length < 100) bad("That file isn't a picture");
+    head = bytes.subarray(0, 65536);
+    size = bytes.length;
+  } else {
+    if (!b64 || typeof b64 !== "string") bad("No picture came through");
+    if (b64.startsWith("data:")) b64 = b64.slice(b64.indexOf(",") + 1);
+    if (!/^[A-Za-z0-9+/]+={0,2}$/.test(b64.slice(0, 200)) || b64.length < 100) bad("That file isn't a picture");
+    head = fromB64(b64.slice(0, 87380));
+    size = Math.floor((b64.length * 3) / 4) - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
+  }
+  const info = imageInfo(head);
   if (!info) bad("That file isn't a picture");
   if (info.mime === "image/heic") bad("That's an iPhone HEIC photo. Add the Convert Image step to the Shortcut, or use Add screenshots in the app.");
-  const bytes = Math.floor((b64.length * 3) / 4) - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
-  if (bytes > MAX_BYTES) bad("That picture is too big (10 MB max)");
-  const sha = await sha256hex(b64);
-  const dup = await db.prepare("SELECT id, filed_at FROM logs_items WHERE sha = ? LIMIT 1").bind(sha).first();
+  if (size > (bytes ? MAX_SHARE_BYTES : MAX_BYTES)) bad(`That picture is too big (${bytes ? 6 : 10} MB max). Add the Convert Image step to the Shortcut.`);
+  sha = await sha256hex(bytes || fromB64(b64)); // always the picture's bytes, so the same file matches however it came in
+  const dup = await db.prepare("SELECT id, filed_at FROM logs_items WHERE sha = ? AND status != 'uploading' LIMIT 1").bind(sha).first();
   if (dup) return { id: dup.id, dup: true, filed: !!dup.filed_at };
+  if (bytes) b64 = toB64(bytes);
 
   const now = nowS();
   let sent = dateFromName(name, now);
@@ -243,13 +257,14 @@ export async function storeImage(env, { b64, clientId, clientName, source, name,
       sentSrc = "photo";
     }
   }
+  // the row stays 'uploading' (hidden) until every part of the picture is saved
   const r = await db
     .prepare(
       `INSERT INTO logs_items (client_id, client_name, source, batch_key, orig_name, mime, bytes, w, h, sha, received_at, sent_at, sent_src, status, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'new',?,?)`
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,'uploading',?,?)`
     )
     .bind(
-      clientId ?? null, clientName || "", source, `${source}:${clientId ?? "later"}`, text(name, 160), info.mime, bytes,
+      clientId ?? null, clientName || "", source, `${source}:${clientId ?? "later"}`, text(name, 160), info.mime, size,
       info.w || null, info.h || null, sha, now, sent ? sent.t : null, sentSrc, now, now
     )
     .run();
@@ -258,10 +273,11 @@ export async function storeImage(env, { b64, clientId, clientName, source, name,
   for (let i = 0, p = 0; i < b64.length; i += PART, p++) {
     stmts.push(db.prepare("INSERT INTO logs_blobs (item_id, part, b64) VALUES (?,?,?)").bind(id, p, b64.slice(i, i + PART)));
   }
+  stmts.push(db.prepare("UPDATE logs_items SET status = 'new' WHERE id = ?").bind(id));
   try {
     await db.batch(stmts);
   } catch (e) {
-    await db.prepare("DELETE FROM logs_items WHERE id = ?").bind(id).run();
+    await db.batch([db.prepare("DELETE FROM logs_blobs WHERE item_id = ?").bind(id), db.prepare("DELETE FROM logs_items WHERE id = ?").bind(id)]);
     throw e;
   }
   return { id, dup: false };
@@ -357,6 +373,39 @@ export async function askModels(env, dataUrl, models = MODELS) {
   throw new Error(errors.join(" | ") || "No model answered");
 }
 
+const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
+const two = (n) => String(n).padStart(2, "0");
+function mkDate(y, mo, d) {
+  mo = +mo;
+  d = +d;
+  if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
+  if (y) {
+    const iso = `${String(y).length === 2 ? "20" + y : y}-${two(mo)}-${two(d)}`;
+    return isDate(iso) ? iso : null;
+  }
+  return isDate(`2024-${two(mo)}-${two(d)}`) ? `${two(mo)}-${two(d)}` : null; // 2024 allows 29 Feb
+}
+// "Mon 21 Sep", "21st September 2026", "Sep 21", "21/09/2026", "21/09" (UK order). Returns YYYY-MM-DD or MM-DD.
+export function dateFromShown(label) {
+  if (!label) return null;
+  const t = String(label).toLowerCase();
+  const mon = "(jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\\.?";
+  let m = t.match(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+${mon}(?:,?\\s+(\\d{4}))?`));
+  if (m) return mkDate(m[3], MONTHS[m[2]], m[1]);
+  m = t.match(new RegExp(`\\b${mon}\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:,?\\s+(\\d{4}))?`));
+  if (m) return mkDate(m[3], MONTHS[m[1]], m[2]);
+  m = t.match(/\b(\d{1,2})[/.](\d{1,2})(?:[/.](\d{4}|\d{2}))?\b/);
+  if (m) return mkDate(m[3], m[2], m[1]);
+  return null;
+}
+function cleanDate(v) {
+  if (typeof v !== "string") return null;
+  let m = v.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) return mkDate(m[1], m[2], m[3]);
+  m = v.trim().match(/^(\d{2})-(\d{2})$/);
+  return m ? mkDate(null, m[1], m[2]) : null;
+}
+
 const toNum = (v, min, max, dp = 0) => {
   if (v === null || v === undefined || v === "" || typeof v === "boolean") return null;
   const n = typeof v === "number" ? v : Number(String(v).replace(/[,\s]|kcal|cal|g$/gi, ""));
@@ -372,8 +421,8 @@ export function cleanReading(o) {
   if (kind === "foodsteps" || kind === "food_and_steps" || kind === "both") kind = "food_steps";
   if (!KINDS.includes(kind)) kind = "other";
   const s = (v, max) => (typeof v === "string" && v.trim() && !/^null$/i.test(v.trim()) ? v.trim().slice(0, max) : null);
-  let date = s(o.date, 12);
-  if (date && !/^(\d{4}-)?\d{2}-\d{2}$/.test(date)) date = null;
+  // a day and month read from the label on screen beats the model's own conversion (it can swap day and month)
+  const date = dateFromShown(s(o.date_shown, 40)) || cleanDate(o.date);
   let clock = s(o.clock, 8);
   if (clock) {
     const m = clock.match(/^(\d{1,2})[:.](\d{2})/);
@@ -417,7 +466,7 @@ export function cleanReading(o) {
 export async function readItem(env, id) {
   const db = env.LOGS_DB;
   const it = await db.prepare("SELECT * FROM logs_items WHERE id = ?").bind(id).first();
-  if (!it) return null;
+  if (!it || it.status === "uploading" || it.status === "dup") return it ? itemById(db, id) : null;
   const now = nowS();
   if (!env.AI) {
     await db.prepare("UPDATE logs_items SET status='failed', read_error=?, updated_at=? WHERE id=?").bind("Reading isn't switched on", now, id).run();
@@ -439,18 +488,46 @@ export async function readItem(env, id) {
   }
   const r = cleanReading(out.reading);
   const reading = JSON.stringify({ date_shown: r.date_shown, date: r.date, clock: r.clock, model: out.model });
-  if (it.edited) {
+  // "AND edited = 0": if you typed numbers while it was reading, yours win
+  const res = await db
+    .prepare(
+      `UPDATE logs_items SET status='read', read_at=?, read_error=NULL, reading=?, kind=?, app=?, kcal=?, protein=?, carbs=?, fat=?, steps=?,
+         kcal_goal=?, partial=?, extras=?, note=?, updated_at=? WHERE id=? AND edited = 0`
+    )
+    .bind(t, reading, r.kind, r.app, r.calories, r.protein_g, r.carbs_g, r.fat_g, r.steps, r.calorie_goal, r.partial ? 1 : 0, JSON.stringify(r.extras), r.note, t, id)
+    .run();
+  if (!res.meta || !res.meta.changes) {
     await db.prepare("UPDATE logs_items SET status='read', read_at=?, read_error=NULL, reading=?, updated_at=? WHERE id=?").bind(t, reading, t, id).run();
   } else {
-    await db
-      .prepare(
-        `UPDATE logs_items SET status='read', read_at=?, read_error=NULL, reading=?, kind=?, app=?, kcal=?, protein=?, carbs=?, fat=?, steps=?,
-           kcal_goal=?, partial=?, extras=?, note=?, updated_at=? WHERE id=?`
-      )
-      .bind(t, reading, r.kind, r.app, r.calories, r.protein_g, r.carbs_g, r.fat_g, r.steps, r.calorie_goal, r.partial ? 1 : 0, JSON.stringify(r.extras), r.note, t, id)
-      .run();
+    await markIfRepeat(db, id, r);
   }
   return itemById(db, id);
+}
+
+// The same screenshot can come in twice (share button one night, then a chat export later): the picture
+// bytes differ, but the screen doesn't. Same client, same status bar time, same kind and same numbers, arriving
+// another way or at another time, means it's a repeat. (Two halves of one diary sent together aren't touched.)
+// Keep the one with the better date, or the one you've already worked on.
+async function markIfRepeat(db, id, r) {
+  if (!r.clock || (r.calories == null && r.steps == null)) return;
+  const it = await db.prepare("SELECT * FROM logs_items WHERE id = ?").bind(id).first();
+  if (!it) return;
+  const { results } = await db
+    .prepare(
+      `SELECT id, source, received_at, sent_at, filed_at, edited, day_src, reading, kind, kcal, steps, protein FROM logs_items
+       WHERE id != ? AND status = 'read' AND COALESCE(client_id, -1) = COALESCE(?, -1) AND kind = ? AND received_at > ?`
+    )
+    .bind(id, it.client_id, it.kind, nowS() - 120 * 86400)
+    .all();
+  const twin = results.find((x) => {
+    const rr = safeJSON(x.reading, {});
+    const apart = x.source !== it.source || Math.abs(x.received_at - it.received_at) > 600;
+    return apart && rr.clock === r.clock && (x.kcal ?? null) === (r.calories ?? null) && (x.steps ?? null) === (r.steps ?? null) && (x.protein ?? null) === (r.protein_g ?? null);
+  });
+  if (!twin) return;
+  const oldIsWorkedOn = twin.filed_at || twin.edited || twin.day_src === "manual";
+  const loser = !oldIsWorkedOn && it.sent_at && !twin.sent_at ? twin.id : id;
+  await db.prepare("UPDATE logs_items SET status = 'dup', updated_at = ? WHERE id = ?").bind(nowS(), loser).run();
 }
 
 // ---------- shaping for the app ----------
@@ -487,6 +564,7 @@ const pub = (r) => ({
   note: r.note,
   edited: !!r.edited,
   filed_at: r.filed_at,
+  v: String(r.sha || "").slice(0, 12),
 });
 async function itemById(db, id) {
   const r = await db.prepare("SELECT * FROM logs_items WHERE id = ?").bind(id).first();
@@ -506,9 +584,9 @@ async function getState(env) {
   const db = env.LOGS_DB;
   const cutoff = nowS() - KEEP_FILED_DAYS * 86400;
   const [items, targets, usage, key, clients] = await Promise.all([
-    db.prepare("SELECT * FROM logs_items WHERE filed_at IS NULL OR filed_at > ? ORDER BY received_at, id").bind(cutoff).all(),
+    db.prepare("SELECT * FROM logs_items WHERE status NOT IN ('uploading','dup') AND (filed_at IS NULL OR filed_at > ?) ORDER BY received_at, id").bind(cutoff).all(),
     db.prepare("SELECT * FROM logs_targets").all(),
-    db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(bytes),0) AS bytes FROM logs_items").first(),
+    db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(bytes),0) AS bytes FROM logs_items WHERE status != 'dup'").first(),
     getKey(db),
     clientsFromPay(env),
   ]);
@@ -519,7 +597,7 @@ async function getState(env) {
     items: items.results.map(pub),
     targets: t,
     key,
-    usage: { count: usage.n, bytes: usage.bytes },
+    usage: { count: usage.n, bytes: usage.bytes, stored: Math.round(usage.bytes * 1.34), limit: DB_LIMIT },
     keep: { filedDays: KEEP_FILED_DAYS, anyDays: KEEP_ANY_DAYS },
     now: nowS(),
   };
@@ -570,8 +648,10 @@ export async function handleLogsApp(req, env, url, path, ctx) {
     const it = await db.prepare("SELECT mime FROM logs_items WHERE id = ?").bind(id).first();
     if (!it) throw new HttpError(404, "Not found");
     const b64 = await loadB64(db, id);
+    if (!b64) return new Response("Not ready", { status: 404, headers: { "cache-control": "no-store" } });
+    // the app asks for /img/<id>?v=<content hash>, so a long cache is safe
     return new Response(fromB64(b64), {
-      headers: { "content-type": it.mime, "cache-control": "private, max-age=31536000, immutable" },
+      headers: { "content-type": it.mime, "cache-control": url.searchParams.get("v") ? "private, max-age=31536000, immutable" : "private, no-cache" },
     });
   }
 
@@ -644,30 +724,33 @@ export async function handleLogsApp(req, env, url, path, ctx) {
 
   if (path === "/bulk" && method === "POST") {
     const b = await body();
-    const ids = Array.isArray(b.ids) ? [...new Set(b.ids.map(idOf))].slice(0, 500) : [];
-    if (!ids.length) bad("Pick some screenshots first");
+    const all = Array.isArray(b.ids) ? [...new Set(b.ids.map(idOf))].slice(0, 1000) : [];
+    if (!all.length) bad("Pick some screenshots first");
     const now = nowS();
-    const ph = ids.map(() => "?").join(",");
-    if (b.action === "delete") {
-      await db.batch([
-        db.prepare(`DELETE FROM logs_blobs WHERE item_id IN (${ph})`).bind(...ids),
-        db.prepare(`DELETE FROM logs_items WHERE id IN (${ph})`).bind(...ids),
-      ]);
-    } else if (b.action === "client") {
-      const c = await clientRef(env, b.client_id);
-      await db.prepare(`UPDATE logs_items SET client_id = ?, client_name = ?, updated_at = ? WHERE id IN (${ph})`).bind(c.id, c.name, now, ...ids).run();
-    } else if (b.action === "day") {
-      if (b.day === null || b.day === "") {
-        await db.prepare(`UPDATE logs_items SET day = NULL, day_src = NULL, updated_at = ? WHERE id IN (${ph})`).bind(now, ...ids).run();
-      } else {
-        if (!isDay(b.day)) bad("Pick a day");
-        await db.prepare(`UPDATE logs_items SET day = ?, day_src = 'manual', updated_at = ? WHERE id IN (${ph})`).bind(b.day, now, ...ids).run();
+    let c = null;
+    if (b.action === "client") c = await clientRef(env, b.client_id);
+    if (b.action === "day" && b.day !== null && b.day !== "" && !isDay(b.day)) bad("Pick a day");
+    if (!["delete", "client", "day", "file", "unfile"].includes(b.action)) bad("Unknown action");
+    // D1 takes at most 100 values per query, so big selections go in chunks
+    const stmts = [];
+    for (let i = 0; i < all.length; i += 90) {
+      const ids = all.slice(i, i + 90);
+      const ph = ids.map(() => "?").join(",");
+      if (b.action === "delete") {
+        stmts.push(db.prepare(`DELETE FROM logs_blobs WHERE item_id IN (${ph})`).bind(...ids));
+        stmts.push(db.prepare(`DELETE FROM logs_items WHERE id IN (${ph})`).bind(...ids));
+      } else if (b.action === "client") {
+        stmts.push(db.prepare(`UPDATE logs_items SET client_id = ?, client_name = ?, updated_at = ? WHERE id IN (${ph})`).bind(c.id, c.name, now, ...ids));
+      } else if (b.action === "day") {
+        if (b.day === null || b.day === "") stmts.push(db.prepare(`UPDATE logs_items SET day = NULL, day_src = NULL, updated_at = ? WHERE id IN (${ph})`).bind(now, ...ids));
+        else stmts.push(db.prepare(`UPDATE logs_items SET day = ?, day_src = 'manual', updated_at = ? WHERE id IN (${ph})`).bind(b.day, now, ...ids));
+      } else if (b.action === "file") {
+        stmts.push(db.prepare(`UPDATE logs_items SET filed_at = ?, updated_at = ? WHERE id IN (${ph}) AND filed_at IS NULL`).bind(now, now, ...ids));
+      } else if (b.action === "unfile") {
+        stmts.push(db.prepare(`UPDATE logs_items SET filed_at = NULL, updated_at = ? WHERE id IN (${ph})`).bind(now, ...ids));
       }
-    } else if (b.action === "file") {
-      await db.prepare(`UPDATE logs_items SET filed_at = ?, updated_at = ? WHERE id IN (${ph}) AND filed_at IS NULL`).bind(now, now, ...ids).run();
-    } else if (b.action === "unfile") {
-      await db.prepare(`UPDATE logs_items SET filed_at = NULL, updated_at = ? WHERE id IN (${ph})`).bind(now, ...ids).run();
-    } else bad("Unknown action");
+    }
+    await db.batch(stmts);
     return json({ ok: true, state: await getState(env) });
   }
 
@@ -725,12 +808,14 @@ export async function handleLogsShare(req, env, url, ctx) {
     if (path === "/upload" && req.method === "POST") {
       const ct = (req.headers.get("content-type") || "").toLowerCase();
       let who = url.searchParams.get("client") || "";
+      let origName = "";
       const files = [];
       if (ct.includes("multipart/form-data") || ct.includes("application/x-www-form-urlencoded")) {
         const fd = await req.formData();
         for (const [k, v] of fd.entries()) {
           if (typeof v === "string") {
             if (/^(client|who)$/i.test(k) && !who) who = v;
+            else if (/^(name|filename)$/i.test(k) && v.trim()) origName = v.trim();
           } else if (v && typeof v.arrayBuffer === "function") files.push({ name: v.name || "", u8: new Uint8Array(await v.arrayBuffer()) });
         }
       } else if (ct.startsWith("image/") || ct.includes("octet-stream")) {
@@ -745,7 +830,9 @@ export async function handleLogsShare(req, env, url, ctx) {
       who = who.trim();
       let client = { id: null, name: "" };
       if (who && !/^sort later$/i.test(who)) {
-        const match = (await clientsFromPay(env)).find((c) => c.name.trim().toLowerCase() === who.toLowerCase());
+        const all = await clientsFromPay(env);
+        const same = (c) => c.name.trim().toLowerCase() === who.toLowerCase();
+        const match = all.find((c) => !c.finished && same(c)) || all.find(same);
         client = match ? { id: match.id, name: match.name } : { id: null, name: who.slice(0, 80) };
       }
       let saved = 0;
@@ -753,9 +840,8 @@ export async function handleLogsShare(req, env, url, ctx) {
       const errors = [];
       for (const f of files) {
         try {
-          if (f.u8 && f.u8.length > MAX_BYTES) bad("That picture is too big (10 MB max)");
           const res = await storeImage(env, {
-            b64: f.b64 || toB64(f.u8), clientId: client.id, clientName: client.name, source: "share", name: f.name,
+            bytes: f.u8, b64: f.b64, clientId: client.id, clientName: client.name, source: "share", name: (files.length === 1 && origName) || f.name,
           });
           if (res.dup) dups++;
           else {
@@ -793,8 +879,11 @@ export async function logsCron(env) {
   await ensureLogsSchema(db);
   const now = nowS();
   const old = await db
-    .prepare("SELECT id FROM logs_items WHERE (filed_at IS NOT NULL AND filed_at < ?) OR received_at < ? LIMIT 200")
-    .bind(now - KEEP_FILED_DAYS * 86400, now - KEEP_ANY_DAYS * 86400)
+    .prepare(
+      `SELECT id FROM logs_items WHERE (filed_at IS NOT NULL AND filed_at < ?) OR received_at < ? OR status = 'dup'
+         OR (status = 'uploading' AND received_at < ?) LIMIT 200`
+    )
+    .bind(now - KEEP_FILED_DAYS * 86400, now - KEEP_ANY_DAYS * 86400, now - 3600)
     .all();
   const ids = old.results.map((r) => r.id);
   for (let i = 0; i < ids.length; i += 50) {
