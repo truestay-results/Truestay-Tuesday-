@@ -22,3 +22,17 @@ Private client payment and revenue tracker. Phone-first web app: add it to your 
 - Sign-in: email and password once per device (sessions last a year), optional Face ID via passkeys
 - Money stored in pence; tracking starts 28 September 2026
 - Look, colours, sizes and the tap-area rules: see [`DESIGN.md`](DESIGN.md). Read it before changing how `/pay` looks
+
+## TrueStay Logs (`/logs`)
+
+Clients' nightly food and step screenshots, read automatically and sorted into one PDF per client. Same sign in as Pay (email, password, Face ID).
+
+- Front end: `public/logs/` (`app.js` the app, `pdf.js` a small hand-written PDF maker, so there's no library to load)
+- API: `src/logs.js`. The app's routes are `/api/pay/logs/*` (they sit behind Pay's sign in); the share button's are `/api/logs/clients` and `/api/logs/upload`, which need the link key made in the app (Settings, Share button)
+- Getting screenshots in:
+  - WhatsApp share button: an iPhone Shortcut, set up once from the steps in the app. Works for 1 or 50 at a time
+  - Add screenshots: pick from Photos (resized on the phone before upload)
+  - Import a WhatsApp chat: the Export Chat zip is opened on the phone, and each picture keeps the date and time it was sent
+- Reading: Workers AI (binding `AI`), vision models listed at the top of `src/logs.js`. It reads the kind of screen, any date on it, the status bar clock, calories, protein, carbs, fat, steps and a few extras
+- Which day a screenshot is for: worked out in `effDay` in `public/logs/app.js`, from a date on the screenshot, then when it was sent, then when it was shared. Anything it can't place goes in "Needs a day"
+- Data: D1 database `truestay-logs` (binding `LOGS_DB`). Pictures are kept as base64 in parts under 1 MB and deleted 14 days after they go in a PDF (90 days at most) by the hourly cron

@@ -1,6 +1,7 @@
-# TrueStay Pay: design notes
+# TrueStay Pay and Logs: design notes
 
-The rules behind how `/pay` looks and behaves, so every change stays consistent and keeps passing the same checks.
+The rules behind how `/pay` and `/logs` look and behave, so every change stays consistent and keeps passing the same checks.
+Logs uses exactly the same tokens, sizes and rules as Pay (its own copy lives in `public/logs/app.css`).
 Code lives in `public/pay/app.css` (tokens at the top) and `public/pay/app.js`.
 
 This is the Pay app's own look. The TrueStay social content palette (burnt orange, off-white, charcoal) is a separate thing.
@@ -109,3 +110,14 @@ Check on a phone-sized screen (390px, and 360px for the narrow case), light and 
 5. Every icon-only button has a name.
 6. Empty screens (no clients, no payments) look right, not just the full ones.
 7. Bump `?v=` on `app.css` and `app.js` in `index.html` and `SHELL`/`CACHE` in `sw.js` together, so phones pick up the new files.
+
+## PDFs (TrueStay Logs)
+
+A client might see these, so they use the TrueStay Results brand rather than the app's lime.
+
+- Charcoal `#1A1A1A` header band and text, off-white `#F2EDE4` on charcoal, secondary text `#5E5E5E` (6.5:1 on white)
+- Burnt orange `#C45A1E` for marks only (bars, the accent rule). It's 4.35:1 on white, so never small text
+- Helvetica (built into every PDF reader), A4, 36pt margins
+- One measure per chart, never two scales on one chart. The target is a solid line, with its key next to the chart title so it never sits on a bar
+- A tick shape marks a day on target, so status is never colour alone. Missing numbers show as a lone dash
+- Screenshots three across with rounded corners and a hairline edge, two days to a page, each day headed with its totals

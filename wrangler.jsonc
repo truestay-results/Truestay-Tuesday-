@@ -19,8 +19,14 @@
       "database_name": "truestay-pay",
       "database_id": "4073abea-7d59-4667-aa50-7102e2ed983b",
       "migrations_dir": "migrations"
+    },
+    {
+      "binding": "LOGS_DB",
+      "database_name": "truestay-logs",
+      "database_id": "fd1ee796-5e79-46d9-914c-c5f5f4623540"
     }
   ],
+  "ai": { "binding": "AI" },
   "triggers": { "crons": ["0 * * * *"] },
   "observability": { "enabled": true }
 }

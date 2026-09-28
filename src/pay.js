@@ -25,6 +25,7 @@ import {
   ensureSchema, generate, cleanPlan, addFirstPlan, switchPlan, finishClient, editPlan, deletePlan, clientStatus, currentPlan, planLabel,
 } from "./pay-plans.js";
 import { vapidKeys, pushAll } from "./pay-push.js";
+import { handleLogsApp } from "./logs.js";
 
 const LOCK_OPTIONS = [0, 1, 5, 15, 60, 240];
 // Server-side idle window. "Every open" (1) gets a 2 minute window; the app's own lock screen handles re-opening.
@@ -462,7 +463,7 @@ export async function payCron(env) {
   if (msg) await pushAll(db, msg);
 }
 
-export async function handlePay(req, env, url) {
+export async function handlePay(req, env, url, ctx) {
   try {
     if (!env.PAY_DB) throw new HttpError(500, "Database isn't connected");
     checkRequestShape(req, url);
@@ -576,6 +577,9 @@ export async function handlePay(req, env, url) {
     const today = londonToday();
     const now = nowS();
     await ensureSchema(db);
+
+    // TrueStay Logs (/logs) shares this sign-in
+    if (path.startsWith("/logs/")) return await handleLogsApp(req, env, url, path.slice("/logs".length), ctx); // await, so its errors land in the catch below
 
     if (path === "/data" && method === "GET") return json(await getData(env));
 

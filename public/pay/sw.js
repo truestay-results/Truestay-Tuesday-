@@ -9,7 +9,10 @@ self.addEventListener("install", (e) => {
 });
 self.addEventListener("activate", (e) => {
   e.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)))).then(() => self.clients.claim())
+    caches
+      .keys()
+      .then((keys) => Promise.all(keys.filter((k) => k.startsWith("ts-pay-") && k !== CACHE).map((k) => caches.delete(k)))) // leave other apps' caches alone
+      .then(() => self.clients.claim())
   );
 });
 self.addEventListener("fetch", (e) => {

@@ -1,0 +1,17 @@
+{
+  "name": "TrueStay Logs",
+  "short_name": "TS Logs",
+  "description": "Clients' food and step screenshots, sorted into one PDF each",
+  "id": "/logs/",
+  "start_url": "/logs/",
+  "scope": "/logs/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#E3E8E5",
+  "theme_color": "#E3E8E5",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
