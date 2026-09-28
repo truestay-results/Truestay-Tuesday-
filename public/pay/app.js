@@ -5,11 +5,14 @@
   const API = "/api/pay";
   const TRACK_START = "2026-09-28";
   const PKG = { pt: "PT only", coaching: "Full coaching", programme: "Programme" };
+  const KIND = { pt: "Personal training", coaching: "Full coaching", programme: "Programme", break: "Break" };
+  const KIND_SHORT = { pt: "PT", coaching: "Coaching", programme: "Programme", break: "Break" };
   const TEN = { new: "New", newish: "New-ish", longstanding: "Longstanding" };
   const METH = { manual: "Manual", dd: "Direct debit" };
   const METH_LONG = { manual: "Manual payment", dd: "Direct debit" };
   const CST = { active: "Active", paused: "Paused", finished: "Finished" };
   const STL = { paid: "Paid", unpaid: "Unpaid", overdue: "Overdue" };
+  const BILL = { monthly: "Monthly", upfront: "Upfront", split: "Split", none: "As they go" };
   const WEEKS = [4, 8, 12, 16];
   const LOCKS = [
     [1, "Every time I open it"],
@@ -19,7 +22,7 @@
     [0, "Never"],
   ];
   const LOCK_GRACE_MS = 10000; // "every time": ignore quick glances at a notification
-  const TAB_ORDER = { month: 0, calendar: 1, clients: 3, more: 4 };
+  const TAB_ORDER = { month: 0, calendar: 1, clients: 3, growth: 4 };
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // ---------- tiny utils ----------
@@ -42,11 +45,12 @@
       localStorage.setItem("tsp." + k, v);
     } catch {}
   };
+  const firstName = (n) => String(n || "").trim().split(/\s+/)[0] || "";
 
   // dates — 'YYYY-MM-DD' strings in UK time
   const londonToday = () =>
     new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
-  const londonHour = () => Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "numeric", hour12: false }).format(new Date()));
+  const londonHour = () => Number(new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", hour: "numeric", hour12: false }).format(new Date())) % 24;
   const nums = (iso) => iso.split("-").map(Number);
   const utc = (iso) => {
     const [y, m, d] = nums(iso);
@@ -72,8 +76,22 @@
     const [y, m] = nums(mk);
     return new Date(Date.UTC(y, m, 0)).getUTCDate();
   };
+  const addDays = (iso, n) => {
+    const d = utc(iso);
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  const occurrence = (mk, day) => `${mk}-${pad(Math.min(day, daysIn(mk)))}`;
+  const nextOnDay = (day, from) => {
+    const d = occurrence(mKey(from), day);
+    return d >= from ? d : occurrence(addMonths(mKey(from), 1), day);
+  };
   const daysBetween = (a, b) => Math.round((utc(b) - utc(a)) / 86400000);
   const ordinal = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th");
+  const ago = (iso) => {
+    const d = daysBetween(iso, londonToday());
+    return d <= 0 ? "today" : d === 1 ? "yesterday" : `${d} days ago`;
+  };
 
   // money — pence integers
   const money = (p) => {
@@ -83,11 +101,12 @@
   const moneyBig = (p) => "£" + Math.floor(p / 100).toLocaleString("en-GB") + `<small>.${pad(p % 100)}</small>`;
   const moneyCompact = (p) => (p >= 100000 ? "£" + (p / 100000).toFixed(p >= 1000000 ? 0 : 1).replace(/\.0$/, "") + "k" : money(p));
   const parseMoney = (s) => {
-    const t = String(s).replace(/[£,\s]/g, "");
+    const t = String(s ?? "").replace(/[£,\s]/g, "");
     if (!/^\d+(\.\d{1,2})?$/.test(t)) return null;
     return Math.round(parseFloat(t) * 100);
   };
-  const moneyInput = (p) => (p == null ? "" : p % 100 ? (p / 100).toFixed(2) : String(p / 100));
+  const pounds0 = (p) => "£" + Math.round(p / 100).toLocaleString("en-GB");
+  const moneyInput = (p) => (p == null || p === "" ? "" : p % 100 ? (p / 100).toFixed(2) : String(p / 100));
   const initials = (name) =>
     String(name || "?").trim().split(/\s+/).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
 
@@ -96,8 +115,10 @@
     bars: '<path d="M4 20V11"/><path d="M10 20V4"/><path d="M16 20v-6"/><path d="M22 20H2"/>',
     cal: '<rect x="3" y="4.5" width="18" height="17" rx="4"/><path d="M8 2.5v4M16 2.5v4M3 10h18"/>',
     users: '<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5"/><path d="M16 4.6a3.5 3.5 0 0 1 0 6.8M18.5 14.8c1.7.8 2.8 2.5 3.1 5.2"/>',
+    trend: '<path d="m3 17 6-6 4 4 8-8"/><path d="M15 7h6v6"/>',
     more: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
     plus: '<path d="M12 5v14M5 12h14"/>',
+    minus: '<path d="M5 12h14"/>',
     check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
     arrow: '<path d="M7 17 17 7M8.5 7H17v8.5"/>',
     left: '<path d="m15 18-6-6 6-6"/>',
@@ -118,9 +139,16 @@
     share: '<path d="M12 3v12M8 7l4-4 4 4"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/>',
     user: '<circle cx="12" cy="8" r="4"/><path d="M4 21c.8-4 4-6 8-6s7.2 2 8 6"/>',
     moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/>',
-    pause: '<rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/>',
-    play: '<path d="M7 5.5v13l11-6.5z"/>',
     edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="m13.5 6.5 4 4"/>',
+    chat: '<path d="M21 11.5a8.5 8.5 0 0 1-12.7 7.4L3 20.5l1.6-4.9A8.5 8.5 0 1 1 21 11.5z"/>',
+    phone: '<path d="M5 4h4l2 5-2.5 1.5a11 11 0 0 0 5 5L15 13l5 2v4a2 2 0 0 1-2 2A16 16 0 0 1 3 6a2 2 0 0 1 2-2z"/>',
+    copy: '<rect x="8" y="8" width="13" height="13" rx="3"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+    bell: '<path d="M6 16V11a6 6 0 1 1 12 0v5l2 2H4z"/><path d="M10 20a2 2 0 0 0 4 0"/>',
+    target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
+    clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+    swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
+    pause: '<rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/>',
+    flag: '<path d="M5 21V4h11l-2 4 2 4H5"/>',
     faceid:
       '<path d="M3 8V6a3 3 0 0 1 3-3h2M16 3h2a3 3 0 0 1 3 3v2M21 16v2a3 3 0 0 1-3 3h-2M8 21H6a3 3 0 0 1-3-3v-2"/><path d="M8.5 9v1.5M15.5 9v1.5M12 9v4.5h-1"/><path d="M8.8 16.3c1.9 1.4 4.5 1.4 6.4 0"/>',
   };
@@ -136,9 +164,8 @@
     session: null,
     data: null,
     cmap: new Map(),
-    smap: new Map(),
     tab: "month", // always opens on Month
-    clientId: null, // open client profile
+    clientId: null,
     month: null,
     calMonth: null,
     calDay: null,
@@ -152,7 +179,11 @@
     listMode: pref("listMode", "list"),
     cStatus: "active",
     cq: "",
+    mixMode: "month",
+    trendSel: null,
+    trendTable: false,
     platformAuth: false,
+    pushHere: false,
     lastSync: 0,
     locked: false,
     counts: {},
@@ -163,14 +194,83 @@
   const client = (id) => S.cmap.get(id);
   const cname = (p) => client(p.client_id)?.name || "Deleted client";
   const stOf = (p) => (p.paid_date ? "paid" : p.due_date < londonToday() ? "overdue" : "unpaid");
-  const schedActive = (id) => !!(id && S.smap.get(id)?.active);
   const pkgText = (pkg, weeks) => (pkg === "programme" && weeks ? `${weeks}-week programme` : PKG[pkg]);
+
+  // ---------- plans ----------
+  const byStart = (a, b) => (a.start_date < b.start_date ? -1 : a.start_date > b.start_date ? 1 : a.id - b.id);
+  const plansOf = (cid) => S.data.plans.filter((p) => p.client_id === cid).sort(byStart);
+  const planOf = (id) => S.data.plans.find((p) => p.id === id);
+  function planOn(cid, day) {
+    let best = null;
+    for (const p of plansOf(cid)) if (p.start_date <= day && (!p.end_date || p.end_date >= day)) best = p;
+    return best;
+  }
+  const curPlan = (cid) => planOn(cid, londonToday());
+  const upcomingPlan = (cid) => plansOf(cid).find((p) => p.start_date > londonToday());
+  const lastPaidPlanBefore = (cid, date) => plansOf(cid).filter((p) => p.start_date < date && p.kind !== "break").pop();
+  // the paid plan they were on before plan `p` started (what "back to" means after a programme or break)
+  const planBefore = (p) => plansOf(p.client_id).filter((x) => x.id !== p.id && x.start_date < p.start_date && x.kind !== "break").pop();
+  function statusOf(c) {
+    const today = londonToday();
+    if (c.finished_on && c.finished_on <= today) return "finished";
+    const cur = curPlan(c.id);
+    if (cur) return cur.kind === "break" ? "paused" : "active";
+    const next = upcomingPlan(c.id);
+    if (next && next.kind === "break") return "paused";
+    return "active";
+  }
+  const planName = (p) => (p.kind === "programme" && p.programme_weeks ? `${p.programme_weeks}-week programme` : KIND[p.kind]);
+  function planPrice(p) {
+    if (!p || p.kind === "break") return "";
+    if (p.billing === "monthly") return `${money(p.price_pence)}/month`;
+    if (p.billing === "upfront") return `${money(p.price_pence)} upfront`;
+    if (p.billing === "split") return `${money(p.price_pence)} in ${p.instalments} payments`;
+    return p.price_pence ? `Pays as they go · usually ${money(p.price_pence)}` : "Pays as they go";
+  }
+  const planDates = (p) =>
+    p.end_date ? `${fmtDay(p.start_date)} → ${fmtDay(p.end_date)}` : p.start_date > londonToday() ? `From ${fmtDay(p.start_date)}` : `Since ${fmtDay(p.start_date)}`;
+  // what a plan is worth per month (programmes spread across their length)
+  function monthlyValue(p) {
+    if (!p || p.kind === "break") return 0;
+    if (p.billing === "monthly") return p.price_pence;
+    if (p.billing === "upfront" || p.billing === "split") {
+      const days = p.programme_weeks ? p.programme_weeks * 7 : p.end_date ? daysBetween(p.start_date, p.end_date) + 1 : 0;
+      return days ? Math.round((p.price_pence * 30.44) / days) : 0;
+    }
+    return 0;
+  }
+  function decisions() {
+    const today = londonToday();
+    const soon = addDays(today, 7);
+    const out = [];
+    for (const c of S.data.clients) {
+      if (statusOf(c) === "finished") continue;
+      const ps = plansOf(c.id);
+      const last = ps[ps.length - 1];
+      if (!last || !last.end_date || last.decided) continue;
+      if (last.end_date > soon) continue;
+      if (last.then_action !== "decide" && last.end_date >= today) continue;
+      out.push({ c, p: last, ended: last.end_date < today });
+    }
+    return out.sort((a, b) => (a.p.end_date < b.p.end_date ? -1 : 1));
+  }
 
   function setData(d) {
     S.data = d;
     S.cmap = new Map(d.clients.map((c) => [c.id, c]));
-    S.smap = new Map(d.schedules.map((s) => [s.id, s]));
     S.lastSync = Date.now();
+    updateBadge();
+  }
+  function actionCount() {
+    const today = londonToday();
+    return S.data.payments.filter((p) => !p.paid_date && p.due_date <= today).length;
+  }
+  function updateBadge() {
+    try {
+      const n = actionCount();
+      if (!("setAppBadge" in navigator)) return;
+      (n ? navigator.setAppBadge(n) : navigator.clearAppBadge()).catch(() => {});
+    } catch {}
   }
 
   // ---------- theme ----------
@@ -196,7 +296,6 @@
         navigator.vibrate(12);
         return;
       }
-      // iOS 18+: toggling a native switch gives a light tap
       const l = document.createElement("label");
       l.style.cssText = "position:fixed;opacity:0;pointer-events:none";
       const i = document.createElement("input");
@@ -288,6 +387,8 @@
     if (/Windows/.test(ua)) return "Windows PC";
     return "This device";
   };
+  const isIOS = () => /iPhone|iPad|iPod/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
   async function passkeyRegister() {
     const o = await api("/webauthn/register/options", { method: "POST" });
     const pk = o.publicKey;
@@ -342,7 +443,6 @@
   const webauthnError = (e) => (isCancel(e) ? "Face ID was cancelled." : e?.message || "Face ID didn't work.");
 
   // ---------- lock timing ----------
-  // The app locks when you come back after being away, never in the middle of using it.
   function awayTooLong() {
     const s = S.session;
     if (!s?.hasPasskey || !s.lockMinutes) return false;
@@ -398,13 +498,12 @@
     $("[data-close]", sh).onclick = () => closeSheet();
     sh.addEventListener("click", (e) => {
       const b = e.target.closest(".opt");
-      if (!b) return;
+      if (!b || b.disabled) return;
       const g = b.parentElement;
       $$(".opt", g).forEach((x) => x.classList.toggle("on", x === b));
       g.dataset.value = b.dataset.val;
       g.dispatchEvent(new Event("change", { bubbles: true }));
     });
-    // drag the top of the sheet down to close
     let y0 = null;
     let dy = 0;
     [$(".grab", sh), $(".sheet-head", sh)].forEach((h) => {
@@ -573,7 +672,7 @@
       if (e.target.closest("#pwBtn")) return renderLogin();
       go(false);
     };
-    go(true); // try straight away; if iOS wants a tap first, one tap does it
+    go(true);
   }
 
   // ---------- derived numbers ----------
@@ -602,17 +701,16 @@
   }
 
   // animated numbers: rendered at their old value, then counted to the new one
+  const fmtKinds = { big: moneyBig, pct: (v) => v + "%", int: (v) => String(v), money, rate: pounds0 };
   const count = (key, value, kind = "money") => {
     const from = S.counts[key] ?? 0;
-    const f = kind === "big" ? moneyBig : kind === "pct" ? (v) => v + "%" : money;
-    return `<span data-count="${key}" data-val="${value}" data-kind="${kind}">${f(from)}</span>`;
+    return `<span data-count="${key}" data-val="${value}" data-kind="${kind}">${fmtKinds[kind](from)}</span>`;
   };
   function runCounts() {
     $$("[data-count]").forEach((el) => {
       const key = el.dataset.count;
       const to = Number(el.dataset.val);
-      const kind = el.dataset.kind;
-      const f = kind === "big" ? moneyBig : kind === "pct" ? (v) => v + "%" : money;
+      const f = fmtKinds[el.dataset.kind] || money;
       const from = S.counts[key] ?? 0;
       S.counts[key] = to;
       if (from === to || reduced) {
@@ -620,9 +718,8 @@
         return;
       }
       const t0 = performance.now();
-      const dur = 800;
       const step = (now) => {
-        const k = Math.min(1, (now - t0) / dur);
+        const k = Math.min(1, (now - t0) / 800);
         const e = 1 - Math.pow(1 - k, 3);
         el.innerHTML = f(Math.round(from + (to - from) * e));
         if (k < 1) requestAnimationFrame(step);
@@ -638,9 +735,10 @@
     if (st === "overdue") return `<span class="pill overdue">Overdue · ${daysBetween(p.due_date, londonToday())}d</span>`;
     return `<span class="pill unpaid">Unpaid</span>`;
   }
+  const chasedNote = (p) => (p.chase_count && !p.paid_date ? `<span class="chased">${ic("chat")} Chased ${p.chase_count > 1 ? p.chase_count + "× · " : ""}${ago(p.chased_at)}</span>` : "");
   function prow(p, { showClient = true } = {}) {
     const st = stOf(p);
-    const rep = schedActive(p.schedule_id) ? " " + ic("repeat") : "";
+    const rep = p.auto ? " " + ic("repeat") : "";
     const title = showClient ? esc(cname(p)) : `Due ${fmtShort(p.due_date)}`;
     const meta = `${esc(pkgText(p.package, p.programme_weeks))} · ${METH[p.method]}${rep}`;
     const row = `<div class="prow st-${st}" data-open-pay="${p.id}" role="button" tabindex="0">
@@ -648,7 +746,7 @@
       <div class="main">
         <div class="name">${title}</div>
         <div class="meta">${meta}</div>
-        <div style="margin-top:6px">${pill(p)}</div>
+        <div class="pills">${pill(p)}${chasedNote(p)}</div>
       </div>
       <div class="right">
         <div class="amt num">${money(p.amount_pence)}</div>
@@ -660,7 +758,9 @@
           : `<button class="paybtn" data-pay="${p.id}" aria-label="Mark ${esc(cname(p))} as paid">${ic("check")}</button>`
       }
     </div>`;
-    return st === "paid" ? `<div class="swipe" data-pid="${p.id}">${row}</div>` : `<div class="swipe" data-pid="${p.id}"><div class="swipe-bg">${ic("check")} Paid</div>${row}</div>`;
+    return st === "paid"
+      ? `<div class="swipe" data-pid="${p.id}">${row}</div>`
+      : `<div class="swipe" data-pid="${p.id}"><div class="swipe-bg chase">${ic("chat")} Chase</div><div class="swipe-bg paid">${ic("check")} Paid</div>${row}</div>`;
   }
   function ptable(ps) {
     return `<div class="table-wrap"><table class="pt">
@@ -669,19 +769,35 @@
         .map((p) => {
           const st = stOf(p);
           return `<tr class="st-${st}">
-          <td class="client">${esc(cname(p))}${schedActive(p.schedule_id) ? ` <span title="Repeats monthly" style="display:inline-block;vertical-align:-2px;width:13px;color:var(--muted)">${ic("repeat")}</span>` : ""}</td>
+          <td class="client">${esc(cname(p))}${p.auto ? ` <span title="From their plan" style="display:inline-block;vertical-align:-2px;width:13px;color:var(--muted)">${ic("repeat")}</span>` : ""}</td>
           <td>${esc(pkgText(p.package, p.programme_weeks))}</td>
           <td class="n num">${money(p.amount_pence)}</td>
           <td class="num">${fmtUK(p.due_date)}</td>
           <td>${METH_LONG[p.method]}</td>
           <td><span class="pill ${st}">${STL[st]}</span></td>
           <td class="num">${fmtUK(p.paid_date)}</td>
-          <td><div class="acts">${st !== "paid" ? `<button class="mini dark" data-pay="${p.id}">Mark paid</button>` : ""}<button class="mini" data-open-pay="${p.id}">Edit</button></div></td>
+          <td><div class="acts">${st !== "paid" ? `<button class="mini dark" data-pay="${p.id}">Mark paid</button><button class="mini" data-chase="${p.id}">Chase</button>` : ""}<button class="mini" data-open-pay="${p.id}">Edit</button></div></td>
         </tr>`;
         })
         .join("")}</tbody></table></div>`;
   }
   const topbar = (title, right = "") => `<div class="topbar"><div class="title">${title}</div><div class="actions">${right}</div></div>`;
+  const settingsBtn = () => `<button class="round" data-tab="more" aria-label="Settings">${ic("user")}</button>`;
+
+  function decisionCard(d, i = 0) {
+    const { c, p, ended } = d;
+    const back = planBefore(p);
+    const when = ended ? `ended ${fmtShort(p.end_date)}` : p.end_date === londonToday() ? "ends today" : `ends ${fmtShort(p.end_date)}`;
+    return `<section class="decide rise" style="--i:${i}">
+      <div class="dh"><span class="ico">${ic("flag")}</span><div><b>${esc(firstName(c.name))}'s ${esc(planName(p).toLowerCase())} ${when}</b><small>What's next for them?</small></div>
+        <button class="x" data-dismiss="${p.id}" aria-label="Dismiss">${ic("x")}</button></div>
+      <div class="da">
+        ${back ? `<button class="btn sm lime" data-resume="${p.id}">Back to ${esc(KIND_SHORT[back.kind])} · ${esc(planPrice(back))}</button>` : ""}
+        <button class="btn sm ghost" data-change-plan="${c.id}" data-from="${addDays(p.end_date, 1)}">Something else</button>
+        <button class="btn sm ghost" data-finish="${c.id}" data-date="${p.end_date}">Finished</button>
+      </div>
+    </section>`;
+  }
 
   // ---------- views ----------
   function viewMonth() {
@@ -699,16 +815,19 @@
     const older = st.overdue.filter((p) => mKey(p.due_date) < mk);
     const noClients = !S.data.clients.length;
     const showFace = S.platformAuth && !S.session.hasPasskey && pref("hideFace", "0") !== "1";
+    const decs = decisions();
 
     return `
-      ${topbar(`<span class="coin-logo spin">£</span>`, `<a class="round" href="${API}/export?type=payments" aria-label="Export payments CSV">${ic("download")}</a><button class="round" data-tab="more" aria-label="Settings">${ic("user")}</button>`)}
+      ${topbar(`<span class="coin-logo spin">£</span>`, `<a class="round" href="${API}/export?type=payments" aria-label="Export payments CSV">${ic("download")}</a>${settingsBtn()}`)}
       <h1 class="hello rise" style="--i:0">${greet}${name}. <em>Here's what's</em> coming in.</h1>
+      ${noClients ? "" : todayCard()}
+      ${decs.map((d, i) => decisionCard(d, i + 1)).join("")}
 
       <div class="monthbar rise" style="--i:1">
         <div class="m">${mLabel(mk)}${mk === cur ? "<small>this month</small>" : ""}</div>
         <div class="navs">
-          <button class="round" data-month="${range[idx - 1] || ""}" data-dir="-1" ${idx > 0 ? "" : "disabled"} aria-label="Previous month">${ic("left")}</button>
-          <button class="round" data-month="${range[idx + 1] || ""}" data-dir="1" ${idx < range.length - 1 ? "" : "disabled"} aria-label="Next month">${ic("right")}</button>
+          <button class="round" data-month="${range[idx - 1] || ""}" ${idx > 0 ? "" : "disabled"} aria-label="Previous month">${ic("left")}</button>
+          <button class="round" data-month="${range[idx + 1] || ""}" ${idx < range.length - 1 ? "" : "disabled"} aria-label="Next month">${ic("right")}</button>
         </div>
       </div>
       <div class="strip" id="strip">
@@ -732,7 +851,7 @@
       <section class="hero rise ${S.heroAnim}" style="--i:2" id="hero">
         ${rings}
         <div class="k">Due in ${mName(mk)}</div>
-        <div class="big num">${count("due", st.dueSum, "big")}</div>
+        <div class="big">${count("due", st.dueSum, "big")}</div>
         <div class="sub">${plural(st.due.length, "payment")} scheduled · ${money(st.collected)} of it paid</div>
         <div class="progress" role="img" aria-label="${pct}% of this month's payments collected">
           <div class="fill" data-pct="${pct}" style="width:${S.counts.pct ?? 0}%"><span class="knob">${count("pct", pct, "pct")}</span></div>
@@ -744,27 +863,27 @@
         <button class="tile lime wide rise" style="--i:3" data-scope="received" id="recvTile">
           <span class="arrow">${ic("arrow")}</span>
           <div class="k">Received in ${mName(mk)}</div>
-          <div class="v num">${count("recv", st.receivedSum, "big")}</div>
+          <div class="v">${count("recv", st.receivedSum, "big")}</div>
           <div class="s">${plural(st.received.length, "payment")} actually landed, by paid date</div>
         </button>
         <button class="tile rise" style="--i:4" data-scope="month" data-status="notpaid">
           <span class="arrow">${ic("arrow")}</span>
           <div class="k">Still unpaid</div>
-          <div class="v num">${count("unpaid", st.unpaidSum)}</div>
+          <div class="v">${count("unpaid", st.unpaidSum)}</div>
           <div class="s">${plural(st.unpaid.length, "payment")} due in ${mShort(mk)}</div>
         </button>
-        <button class="tile red rise${st.overdueSum ? " has" : ""}" style="--i:5" data-scope="unpaid" data-status="overdue">
-          <span class="arrow">${ic("arrow")}</span>
+        <button class="tile red rise${st.overdueSum ? " has" : ""}" style="--i:5" data-action="chase-list">
+          <span class="arrow">${ic("chat")}</span>
           <div class="k">Overdue now</div>
-          <div class="v num">${count("overdue", st.overdueSum)}</div>
-          <div class="s">${st.overdue.length ? '<span class="live"></span>' : ""}${plural(st.overdue.length, "payment")}, all months</div>
+          <div class="v">${count("overdue", st.overdueSum)}</div>
+          <div class="s">${st.overdue.length ? '<span class="live"></span>' + plural(st.overdue.length, "payment") + " · tap to chase" : "0 payments, all months"}</div>
         </button>
       </div>
       ${mk === mKey(TRACK_START) ? `<p class="note">${ic("info")}<span>Tracking started on 28 September 2026, so September only includes payments from then on.</span></p>` : ""}
-      ${mk > cur ? `<p class="note">${ic("info")}<span>Only shows payments already on the books. Monthly repeats appear about a month ahead.</span></p>` : ""}
+      ${mk > cur ? `<p class="note">${ic("info")}<span>Only shows payments already on the books. Monthly plans add theirs about a month ahead.</span></p>` : ""}
       ${
         older.length && S.scope === "month"
-          ? `<button class="banner" data-scope="unpaid" data-status="overdue"><span class="dot">${ic("alert")}</span><span><b>${plural(older.length, "older payment")} still unpaid</b><br>${money(sum(older))} from before ${mName(mk)}</span><span class="go">${ic("right")}</span></button>`
+          ? `<button class="banner" data-action="chase-list"><span class="dot">${ic("alert")}</span><span><b>${plural(older.length, "older payment")} still unpaid</b><br>${money(sum(older))} from before ${mName(mk)} · chase them</span><span class="go">${ic("right")}</span></button>`
           : ""
       }
       ${
@@ -782,7 +901,7 @@
       </div>
       ${
         noClients
-          ? `<div class="empty"><b>Let's get your clients in</b><span>Add each client with their next payment. Turn on "repeat monthly" for the regulars and it'll look after itself.</span><button class="btn sm lime" data-action="add-client">${ic("userplus")} Add your first client</button></div>`
+          ? `<div class="empty"><b>Let's get your clients in</b><span>Add each client with their plan. Monthly plans look after their own payments.</span><button class="btn sm lime" data-action="add-client">${ic("userplus")} Add your first client</button></div>`
           : `
       <div class="filters">
         <div class="seg small full" data-seg="scope">
@@ -808,6 +927,35 @@
       </div>
       <div id="plist"></div>`
       }`;
+  }
+
+  function todayCard() {
+    const today = londonToday();
+    const unpaid = S.data.payments.filter((p) => !p.paid_date);
+    const dueToday = unpaid.filter((p) => p.due_date === today);
+    const week = unpaid.filter((p) => p.due_date > today && p.due_date <= addDays(today, 7));
+    const overdue = unpaid.filter((p) => p.due_date < today);
+    return `<section class="today-card rise" style="--i:1">
+      <div class="tc-head"><b>Today</b><span>${fmtShort(today)}</span></div>
+      ${
+        dueToday.length
+          ? `<div class="tc-list">${dueToday
+              .map(
+                (p) => `<div class="tc-row" data-open-pay="${p.id}" role="button" tabindex="0">
+                  <span class="av sm">${esc(initials(cname(p)))}</span>
+                  <span class="n">${esc(cname(p))}<small>${esc(pkgText(p.package, p.programme_weeks))} · ${METH[p.method]}</small></span>
+                  <span class="a num">${money(p.amount_pence)}</span>
+                  <button class="paybtn sm" data-pay="${p.id}" aria-label="Mark ${esc(cname(p))} as paid">${ic("check")}</button>
+                </div>`
+              )
+              .join("")}</div>`
+          : `<p class="tc-none">${ic("check")} Nothing due today.</p>`
+      }
+      <div class="tc-foot">
+        <span>Next 7 days <b class="num">${week.length ? `${week.length} · ${money(sum(week))}` : "nothing due"}</b></span>
+        ${overdue.length ? `<button class="tc-chase" data-action="chase-list">${ic("chat")} ${overdue.length} overdue · ${money(sum(overdue))}</button>` : ""}
+      </div>
+    </section>`;
   }
 
   function filteredPayments() {
@@ -850,7 +998,7 @@
     el.innerHTML =
       (S.listMode === "table" ? ptable(ps) : `<div class="list">${ps.map((p) => prow(p)).join("")}</div>`) +
       `<div class="total-line"><span>${plural(ps.length, "payment")}</span><span>Total <b class="num">${money(sum(ps))}</b></span></div>` +
-      (S.listMode === "list" && hasUnpaid ? `<p class="tip">Tip: swipe a payment left to mark it paid</p>` : "");
+      (S.listMode === "list" && hasUnpaid ? `<p class="tip">Swipe left to mark paid · swipe right to chase</p>` : "");
   }
 
   function viewCalendar() {
@@ -899,8 +1047,8 @@
         <div class="cal-legend"><span><i style="background:var(--red)"></i>Overdue</span><span><i style="background:var(--amber)"></i>Unpaid</span><span><i style="background:var(--green)"></i>Paid</span></div>
       </div>
       <div class="cal-totals">
-        <div class="tile rise" style="--i:1"><div class="k">Due in ${mShort(mk)}</div><div class="v num">${count("cdue", st.dueSum)}</div><div class="s">${money(st.unpaidSum)} still unpaid</div></div>
-        <div class="tile lime rise" style="--i:2"><div class="k">Received in ${mShort(mk)}</div><div class="v num" style="font-size:27px">${count("crecv", st.receivedSum)}</div><div class="s">by paid date</div></div>
+        <div class="tile rise" style="--i:1"><div class="k">Due in ${mShort(mk)}</div><div class="v">${count("cdue", st.dueSum)}</div><div class="s">${money(st.unpaidSum)} still unpaid</div></div>
+        <div class="tile lime rise" style="--i:2"><div class="k">Received in ${mShort(mk)}</div><div class="v" style="font-size:27px">${count("crecv", st.receivedSum)}</div><div class="s">by paid date</div></div>
       </div>
       <div class="day-head"><h3>${fmtLong(S.calDay)}</h3><span class="num">${dayItems.length ? money(sum(dayItems)) : ""}</span></div>
       ${
@@ -924,13 +1072,13 @@
     S.clientId = null;
     const cs = S.data.clients;
     const counts = { active: 0, paused: 0, finished: 0 };
-    cs.forEach((c) => counts[c.status]++);
+    cs.forEach((c) => counts[statusOf(c)]++);
     return `
       ${topbar("Clients", `<button class="round lime" data-action="add-client" aria-label="Add client">${ic("plus")}</button>`)}
       <div class="filters">
         <label class="search">${ic("search")}<input id="cq" type="search" placeholder="Search clients" value="${esc(S.cq)}" autocomplete="off"></label>
         <div class="seg small full" data-seg="cstatus">
-          ${["active", "paused", "finished"].map((s) => `<button class="${S.cStatus === s ? "on" : ""}" data-cstatus="${s}">${CST[s]} ${counts[s]}</button>`).join("")}
+          ${["active", "paused", "finished"].map((s) => `<button class="${S.cStatus === s ? "on" : ""}" data-cstatus="${s}">${s === "paused" ? "On a break" : CST[s]} ${counts[s]}</button>`).join("")}
           <button class="${S.cStatus === "all" ? "on" : ""}" data-cstatus="all">All ${cs.length}</button>
         </div>
       </div>
@@ -940,30 +1088,33 @@
     const el = $("#clist");
     if (!el) return;
     let list = S.data.clients;
-    if (S.cStatus !== "all") list = list.filter((c) => c.status === S.cStatus);
+    if (S.cStatus !== "all") list = list.filter((c) => statusOf(c) === S.cStatus);
     if (S.cq.trim()) list = list.filter((c) => c.name.toLowerCase().includes(S.cq.trim().toLowerCase()));
     if (!S.data.clients.length) {
-      el.innerHTML = `<div class="empty"><b>No clients yet</b><span>Add your current clients and their next payment.</span><button class="btn sm lime" data-action="add-client">${ic("userplus")} Add client</button></div>`;
+      el.innerHTML = `<div class="empty"><b>No clients yet</b><span>Add your current clients and what they're on.</span><button class="btn sm lime" data-action="add-client">${ic("userplus")} Add client</button></div>`;
       return;
     }
     if (!list.length) {
-      el.innerHTML = `<div class="empty"><b>No ${S.cStatus === "all" ? "" : CST[S.cStatus].toLowerCase() + " "}clients${S.cq ? " match that" : ""}</b></div>`;
+      el.innerHTML = `<div class="empty"><b>No ${S.cStatus === "all" ? "" : S.cStatus === "paused" ? "clients on a break" : CST[S.cStatus].toLowerCase() + " clients"}${S.cq ? " match that" : ""}</b></div>`;
       return;
     }
     el.innerHTML = `<div class="list">${list
       .map((c, i) => {
         const owes = clientOwes(c.id);
         const next = clientNext(c.id);
+        const status = statusOf(c);
+        const cp = curPlan(c.id);
+        const plan = cp ? (cp.kind === "break" ? `On a break${cp.end_date ? ` until ${fmtDay(cp.end_date)}` : ""}` : `${planName(cp)} · ${planPrice(cp)}`) : upcomingPlan(c.id) ? `Starts ${fmtDay(upcomingPlan(c.id).start_date)}` : status === "finished" ? `Finished ${fmtDay(c.finished_on)}` : "No plan yet";
         const right = owes.length
           ? `<b class="owe num">${money(sum(owes))}</b>overdue`
           : next
           ? `<b class="num">${money(next.amount_pence)}</b>next ${fmtDay(next.due_date)}`
           : `<b>—</b>nothing due`;
-        return `<button class="crow rise${c.status !== "active" ? " dim" : ""}" style="--i:${Math.min(i, 8)}" data-open-client="${c.id}">
+        return `<button class="crow rise${status !== "active" ? " dim" : ""}" style="--i:${Math.min(i, 8)}" data-open-client="${c.id}">
           <div class="av">${esc(initials(c.name))}</div>
           <div class="main">
-            <div class="name"><span class="t">${esc(c.name)}</span><span class="tag${c.tenure === "new" ? " new" : ""}">${TEN[c.tenure]}</span>${c.status !== "active" ? `<span class="tag">${CST[c.status]}</span>` : ""}</div>
-            <div class="meta">${esc(pkgText(c.package, c.programme_weeks))} · ${money(c.price_pence)} · ${METH[c.method]}</div>
+            <div class="name"><span class="t">${esc(c.name)}</span>${c.tenure === "new" ? `<span class="tag new">New</span>` : ""}</div>
+            <div class="meta">${esc(plan)}</div>
           </div>
           <div class="right">${right}</div>
           <span class="chev">${ic("right")}</span>
@@ -972,17 +1123,31 @@
       .join("")}</div>`;
   }
 
-  // Client profile: read-only by default, edit is a separate, clearly-labelled sheet.
+  // Client profile: read-only; changes happen in clearly-labelled sheets.
   function viewClient(c) {
+    const today = londonToday();
     const ps = clientPayments(c.id).sort((a, b) => (a.due_date < b.due_date ? 1 : a.due_date > b.due_date ? -1 : b.id - a.id));
     const owes = clientOwes(c.id);
     const next = clientNext(c.id);
     const received = ps.filter((p) => p.paid_date);
-    const reps = S.data.schedules.filter((s) => s.client_id === c.id && s.active);
+    const plans = plansOf(c.id);
+    const cp = curPlan(c.id);
+    const status = statusOf(c);
+    const dec = decisions().find((d) => d.c.id === c.id);
+    const since = plans[0]?.start_date || TRACK_START;
+    const months = Math.max(1, Math.round((daysBetween(since, c.finished_on && c.finished_on < today ? c.finished_on : today) + 1) / 30.44));
+    const avg = Math.round(sum(received) / months);
+    const hours = cp && cp.hours_per_month ? cp.hours_per_month : null;
+    const rate = hours ? Math.round(monthlyValue(cp) / hours) : null;
+    const planLine = cp ? (cp.kind === "break" ? `On a break${cp.end_date ? ` until ${fmtDay(cp.end_date)}` : ""}` : planName(cp)) : status === "finished" ? "Finished" : "No current plan";
+    const phone = (c.phone || "").trim();
     return `
       <div class="topbar">
         <button class="back" data-action="back">${ic("left")} Clients</button>
-        <div class="actions"><button class="btn sm ghost" data-action="edit-client" data-client="${c.id}">${ic("edit")} Edit</button></div>
+        <div class="actions">
+          ${phone ? `<a class="round" href="https://wa.me/${waNumber(phone)}" target="_blank" rel="noopener" aria-label="Message ${esc(c.name)}">${ic("chat")}</a>` : ""}
+          <button class="btn sm ghost" data-action="edit-client" data-client="${c.id}">${ic("edit")} Edit</button>
+        </div>
       </div>
       <section class="profile rise" style="--i:0">
         ${rings}
@@ -990,64 +1155,285 @@
           <div class="bigav">${esc(initials(c.name))}</div>
           <div style="min-width:0">
             <h1>${esc(c.name)}</h1>
-            <div class="tags"><span class="tag dark${c.tenure === "new" ? " new" : ""}">${TEN[c.tenure]}</span><span class="tag dark">${CST[c.status]}</span></div>
+            <div class="tags"><span class="tag dark${c.tenure === "new" ? " new" : ""}">${TEN[c.tenure]}</span><span class="tag dark">${status === "paused" ? "On a break" : CST[status]}</span></div>
           </div>
         </div>
         <div class="facts">
-          <div>Package<b>${esc(pkgText(c.package, c.programme_weeks))}</b></div>
-          <div>Agreed price<b class="num">${money(c.price_pence)}</b></div>
-          <div>Usually pays by<b>${METH_LONG[c.method]}</b></div>
+          <div>On<b>${esc(planLine)}</b></div>
+          <div>Price<b class="num">${cp && cp.kind !== "break" ? esc(planPrice(cp)) : "—"}</b></div>
+          <div>Pays by<b>${cp && cp.kind !== "break" ? METH_LONG[cp.method] : "—"}</b></div>
           <div>Next payment<b class="num">${next ? `${fmtDay(next.due_date)} · ${money(next.amount_pence)}` : "None scheduled"}</b></div>
         </div>
       </section>
-      <div class="tiles" style="grid-template-columns:1fr 1fr">
-        <div class="tile red rise${owes.length ? " has" : ""}" style="--i:1"><div class="k">Overdue</div><div class="v num">${count("c-owe-" + c.id, sum(owes))}</div><div class="s">${owes.length ? '<span class="live"></span>' : ""}${plural(owes.length, "payment")}</div></div>
-        <div class="tile lime rise" style="--i:2"><div class="k">Received</div><div class="v num" style="font-size:27px">${count("c-got-" + c.id, sum(received))}</div><div class="s">since tracking began</div></div>
+      ${dec ? decisionCard(dec, 1) : ""}
+      <div class="quick rise" style="--i:2">
+        <button class="btn lime" data-change-plan="${c.id}">${ic("swap")} Change plan</button>
+        <button class="btn ghost" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add payment</button>
       </div>
-      <div class="quick rise" style="--i:3">
-        <button class="btn lime" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add payment</button>
+      <div class="tiles" style="grid-template-columns:1fr 1fr">
+        <button class="tile red rise${owes.length ? " has" : ""}" style="--i:3" ${owes.length ? `data-chase-client="${c.id}"` : "disabled"}><div class="k">Overdue</div><div class="v">${count("c-owe-" + c.id, sum(owes))}</div><div class="s">${owes.length ? '<span class="live"></span>' + plural(owes.length, "payment") + " · chase" : "All square"}</div></button>
+        <div class="tile lime rise" style="--i:4"><div class="k">Received</div><div class="v" style="font-size:27px">${count("c-got-" + c.id, sum(received))}</div><div class="s">${received.length ? `≈ ${money(avg)}/month over ${plural(months, "month")}` : "since tracking began"}</div></div>
         ${
-          c.status === "active"
-            ? `<button class="btn ghost" data-action="client-status" data-client="${c.id}" data-to="paused">${ic("pause")} Pause</button>`
-            : `<button class="btn ghost" data-action="client-status" data-client="${c.id}" data-to="active">${ic("play")} Make active</button>`
+          rate
+            ? `<div class="tile rise wide" style="--i:5"><div class="k">What you earn per hour</div><div class="v">${count("c-rate-" + c.id, rate, "rate")}<small>/hour</small></div><div class="s">${esc(planPrice(cp))} for about ${hours} hours a month</div></div>`
+            : ""
         }
       </div>
+      <div class="section-head"><h2 class="sm">Plans</h2><span class="hint" style="padding:0">Tap one to fix it</span></div>
       ${
-        reps.length
-          ? `<div class="section-head"><h2 class="sm">Repeats monthly</h2></div>${reps
-              .map(
-                (s) => `<button class="rep-card" data-sched-edit="${s.id}" style="width:100%;text-align:left">
-                  <span class="ic">${ic("repeat")}</span>
-                  <span class="l"><b class="num">${money(s.amount_pence)} on the ${ordinal(s.day_of_month)}</b><small>${esc(pkgText(s.package, s.programme_weeks))} · ${METH_LONG[s.method]}</small></span>
-                  <span class="r" style="color:var(--muted)">${ic("right")}</span>
-                </button>`
-              )
-              .join("")}`
-          : ""
+        plans.length
+          ? `<div class="timeline">${plans
+              .slice()
+              .reverse()
+              .map((p) => {
+                const isNow = cp && p.id === cp.id;
+                const future = p.start_date > today;
+                const firstFuture = plans.find((x) => x.start_date > today);
+                const tag = isNow ? "Now" : future ? (firstFuture && p.id === firstFuture.id ? "Next" : "Later") : "Ended";
+                return `<button class="tl-row${isNow ? " now" : ""}${future ? " next" : ""}${p.kind === "break" ? " brk" : ""}" data-edit-plan="${p.id}">
+                  <span class="tl-dot"></span>
+                  <span class="tl-main"><b>${esc(planName(p))}</b><small>${esc(p.kind === "break" ? "No payments" : planPrice(p))}${p.billing === "monthly" && p.day_of_month ? ` · on the ${ordinal(p.day_of_month)}` : ""}</small><small>${planDates(p)}${p.then_action === "decide" && p.end_date ? " · ask me when it ends" : ""}</small></span>
+                  <span class="tl-tag">${tag}</span>
+                </button>`;
+              })
+              .join("")}</div>`
+          : `<div class="empty"><b>No plan yet</b><span>Set what they're on and the payments look after themselves.</span><button class="btn sm lime" data-change-plan="${c.id}">Set their plan</button></div>`
       }
       ${c.notes ? `<div class="section-head"><h2 class="sm">Notes</h2></div><div class="notes-card">${esc(c.notes)}</div>` : ""}
       <div class="section-head"><h2 class="sm">Payments</h2><span style="color:var(--muted);font-size:14px">${ps.length ? plural(ps.length, "payment") : ""}</span></div>
       ${
         ps.length
           ? `<div class="list">${ps.map((p) => prow(p, { showClient: false })).join("")}</div>`
-          : `<div class="empty"><b>No payments yet</b><button class="btn sm" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add their first payment</button></div>`
+          : `<div class="empty"><b>No payments yet</b><button class="btn sm" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add a payment</button></div>`
       }`;
+  }
+
+  // ---------- Growth ----------
+  function viewGrowth() {
+    const today = londonToday();
+    const cur = mKey(today);
+    const set = S.data.settings || {};
+    const goal = Number(set.goalMonthly) || 0;
+    const clientGoal = Number(set.goalClients) || 0;
+    const active = S.data.clients.filter((c) => statusOf(c) === "active");
+    const current = S.data.clients.map((c) => curPlan(c.id)).filter((p) => p && p.kind !== "break");
+    const runRate = current.reduce((a, p) => a + monthlyValue(p), 0);
+    const payingClients = current.filter((p) => monthlyValue(p) > 0);
+    const avgClient = payingClients.length ? Math.round(runRate / payingClients.length) : 0;
+    const recvMonth = monthStats(cur).receivedSum;
+    const pctGoal = goal ? Math.min(100, Math.round((runRate / goal) * 100)) : 0;
+    const pctRecv = goal ? Math.min(100, Math.round((recvMonth / goal) * 100)) : 0;
+    const gap = goal - runRate;
+    const need = gap > 0 && avgClient ? Math.ceil(gap / avgClient) : 0;
+
+    // trend
+    const months = [];
+    for (let k = mKey(TRACK_START); k <= addMonths(cur, 2); k = addMonths(k, 1)) months.push(k);
+    const trend = months.map((k) => ({
+      k,
+      due: sum(S.data.payments.filter((p) => mKey(p.due_date) === k)),
+      got: sum(S.data.payments.filter((p) => p.paid_date && mKey(p.paid_date) === k)),
+      future: k > cur,
+    }));
+    const tMax = Math.max(1, ...trend.map((t) => Math.max(t.due, t.got)));
+    const niceMax = niceCeil(tMax);
+    const sel = trend.find((t) => t.k === (S.trendSel || cur)) || trend[0];
+
+    // package mix
+    const mix = { pt: 0, coaching: 0, programme: 0 };
+    if (S.mixMode === "plans") current.forEach((p) => (mix[p.kind] += monthlyValue(p)));
+    else
+      S.data.payments
+        .filter((p) => p.paid_date && (S.mixMode === "all" || mKey(p.paid_date) === cur))
+        .forEach((p) => (mix[p.package] += p.amount_pence));
+    const mixTotal = mix.pt + mix.coaching + mix.programme;
+
+    // clients
+    const monthStart = cur + "-01";
+    const firstStart = (c) => plansOf(c.id)[0]?.start_date || null;
+    const joined = S.data.clients.filter((c) => c.tenure === "new" && (firstStart(c) || "").startsWith(cur));
+    const finished = S.data.clients.filter((c) => c.finished_on && mKey(c.finished_on) === cur);
+    const onBreak = S.data.clients.filter((c) => statusOf(c) === "paused");
+    const atStart = S.data.clients.filter((c) => {
+      const fs = firstStart(c);
+      return fs && fs <= monthStart && !(c.finished_on && c.finished_on < monthStart);
+    });
+    const churn = atStart.length ? Math.round((finished.length / atStart.length) * 100) : null;
+    const stays = S.data.clients.map((c) => {
+      const fs = firstStart(c);
+      if (!fs) return null;
+      const end = c.finished_on && c.finished_on < today ? c.finished_on : today;
+      return daysBetween(fs, end) / 30.44;
+    }).filter((x) => x != null);
+    const avgStay = stays.length ? stays.reduce((a, b) => a + b, 0) / stays.length : 0;
+
+    // hourly
+    const withHours = current.filter((p) => p.hours_per_month > 0 && monthlyValue(p) > 0);
+    const hrs = withHours.reduce((a, p) => a + p.hours_per_month, 0);
+    const overallRate = hrs ? Math.round(withHours.reduce((a, p) => a + monthlyValue(p), 0) / hrs) : 0;
+    const rates = withHours
+      .map((p) => ({ c: client(p.client_id), rate: Math.round(monthlyValue(p) / p.hours_per_month), p }))
+      .sort((a, b) => a.rate - b.rate);
+    const rMax = Math.max(1, ...rates.map((r) => r.rate));
+
+    // lifetime
+    const ltv = S.data.clients
+      .map((c) => ({ c, got: sum(clientPayments(c.id).filter((p) => p.paid_date)) }))
+      .filter((x) => x.got > 0)
+      .sort((a, b) => b.got - a.got)
+      .slice(0, 5);
+
+    return `
+      ${topbar("Growth", settingsBtn())}
+      <section class="hero rise" style="--i:0">
+        ${rings}
+        <div class="k">Monthly income <button class="edit-goal" data-action="goal">${goal ? `Goal ${money(goal)}` : "Set a goal"} ${ic("edit")}</button></div>
+        <div class="big">${count("g-run", runRate, "rate")}<small>/month</small></div>
+        <div class="sub">What your current plans bring in each month, with programmes spread across their length.</div>
+        ${
+          goal
+            ? `<div class="progress" role="img" aria-label="${pctGoal}% of your monthly goal">
+                 <div class="fill" data-pct="${pctGoal}" style="width:${S.counts["g-pct"] ?? 0}%"><span class="knob">${count("g-pct", pctGoal, "pct")}</span></div>
+               </div>
+               <div class="progress-legend"><span>${money(runRate)} now</span><span>Goal ${money(goal)}</span></div>
+               <p class="gap">${gap > 0 ? `${money(gap)} to go${need ? ` · about ${plural(need, "more client")} at your average ${pounds0(avgClient)}/month` : ""}` : "Goal hit. Time to raise it?"}</p>
+               <div class="mini-meter"><span>Received in ${mName(cur)}</span><b class="num">${money(recvMonth)}</b><i><em style="width:${pctRecv}%"></em></i></div>`
+            : `<button class="btn sm lime" data-action="goal" style="margin-top:14px">${ic("target")} Set a monthly goal</button>`
+        }
+      </section>
+
+      <section class="chart-card dark rise" style="--i:1">
+        <div class="cc-head"><h3>Money in by month</h3>
+          <div class="legend"><span><i class="sw got"></i>Received</span><span><i class="sw due"></i>Due</span></div></div>
+        <p class="readout" aria-live="polite"><b>${mName(sel.k)}</b> · <b class="num">${money(sel.got)}</b> received · <span class="num">${money(sel.due)}</span> ${sel.future ? "scheduled" : "due"}</p>
+        <div class="trend">
+          <div class="grid-lines"><i style="bottom:100%"><span>${moneyCompact(niceMax)}</span></i><i style="bottom:50%"><span>${moneyCompact(niceMax / 2)}</span></i><i style="bottom:0"><span>£0</span></i></div>
+          <div class="cols">${trend
+            .map(
+              (t, i) => `<button class="col${t.k === sel.k ? " sel" : ""}${t.future ? " future" : ""}" data-trend="${t.k}" style="--i:${i}" aria-label="${mLabel(t.k)}: ${money(t.got)} received, ${money(t.due)} due">
+                <span class="pair"><i class="b due" style="height:${(t.due / niceMax) * 100}%"></i><i class="b got" style="height:${(t.got / niceMax) * 100}%"></i></span>
+                <span class="lbl">${mShort(t.k)}</span></button>`
+            )
+            .join("")}</div>
+        </div>
+        <button class="linkish" data-action="trend-table">${S.trendTable ? "Hide table" : "Show as a table"}</button>
+        ${
+          S.trendTable
+            ? `<table class="mini-table"><thead><tr><th>Month</th><th class="n">Due</th><th class="n">Received</th></tr></thead><tbody>${trend
+                .map((t) => `<tr><td>${mLabel(t.k)}</td><td class="n num">${money(t.due)}</td><td class="n num">${money(t.got)}</td></tr>`)
+                .join("")}</tbody></table>`
+            : ""
+        }
+        ${trend.filter((t) => !t.future).length < 3 ? `<p class="cc-note">Builds up month by month from September 2026.</p>` : ""}
+      </section>
+
+      <section class="chart-card rise" style="--i:2">
+        <div class="cc-head"><h3>Where it comes from</h3><span class="hint" style="padding:0">${S.mixMode === "plans" ? "per month, current plans" : "money received"}</span></div>
+        <div class="seg small full" data-seg="mix">
+          <button class="${S.mixMode === "month" ? "on" : ""}" data-mix="month">${mName(cur)}</button>
+          <button class="${S.mixMode === "all" ? "on" : ""}" data-mix="all">All time</button>
+          <button class="${S.mixMode === "plans" ? "on" : ""}" data-mix="plans">Plans now</button>
+        </div>
+        ${
+          mixTotal
+            ? `<div class="stack" role="img" aria-label="Income split by package">${["pt", "coaching", "programme"]
+                .filter((k) => mix[k] > 0)
+                .map((k) => `<i class="seg-${k}" style="flex-grow:${mix[k]}"></i>`)
+                .join("")}</div>
+               <div class="mix-legend">${["pt", "coaching", "programme"]
+                 .map(
+                   (k) => `<div class="ml"><i class="sw seg-${k}"></i><span>${KIND[k]}</span><b class="num">${money(mix[k])}${S.mixMode === "plans" ? "/mo" : ""}</b><em class="num">${Math.round((mix[k] / mixTotal) * 100)}%</em></div>`
+                 )
+                 .join("")}</div>`
+            : `<p class="cc-note">${S.mixMode === "plans" ? "No current plans yet." : "Nothing received yet for this view."}</p>`
+        }
+      </section>
+
+      <section class="chart-card rise" style="--i:3">
+        <div class="cc-head"><h3>Clients</h3>${clientGoal ? "" : `<button class="linkish" data-action="goal">Set a client goal</button>`}</div>
+        <div class="kpis">
+          <div class="kpi"><span>Active</span><b>${count("k-active", active.length, "int")}${clientGoal ? `<small> of ${clientGoal}</small>` : ""}</b>${clientGoal ? `<i class="kbar"><em style="width:${Math.min(100, Math.round((active.length / clientGoal) * 100))}%"></em></i>` : ""}</div>
+          <div class="kpi"><span>On a break</span><b>${count("k-break", onBreak.length, "int")}</b></div>
+          <div class="kpi"><span>New this month</span><b>${count("k-new", joined.length, "int")}</b></div>
+          <div class="kpi"><span>Finished this month</span><b>${count("k-fin", finished.length, "int")}</b></div>
+        </div>
+        <div class="kpi-lines">
+          <p><span>Churn this month</span><b class="num">${churn == null ? "—" : `${churn}%`}</b></p>
+          <p><span>Average time with you</span><b class="num">${avgStay < 1 ? "Under a month" : `${avgStay.toFixed(1)} months`}</b></p>
+          <p class="cc-note">"New" counts clients marked New. Time with you counts from when tracking began.</p>
+        </div>
+      </section>
+
+      <section class="chart-card rise" style="--i:4">
+        <div class="cc-head"><h3>What you earn per hour</h3></div>
+        ${
+          rates.length
+            ? `<div class="rate-hero"><b>${count("g-rate", overallRate, "rate")}</b><span>/hour across ${plural(rates.length, "client")} with times set</span></div>
+               <div class="hbars">${rates
+                 .map(
+                   (r) => `<button class="hb" data-open-client="${r.c.id}"><span class="hn">${esc(r.c.name)}</span><span class="ht"><i style="width:${(r.rate / rMax) * 100}%"></i></span><b class="num">${pounds0(r.rate)}</b></button>`
+                 )
+                 .join("")}</div>
+               <p class="cc-note">Lowest first. Tap a client to check their plan.</p>`
+            : `<p class="cc-note">Add roughly how long each client takes (sessions a week, or hours a month) when you set or fix their plan, and this shows what you really earn per hour.</p>`
+        }
+      </section>
+
+      <section class="chart-card rise" style="--i:5">
+        <div class="cc-head"><h3>Most money in</h3><span class="hint" style="padding:0">since tracking began</span></div>
+        ${
+          ltv.length
+            ? `<div class="ltv">${ltv
+                .map(
+                  (x, i) => `<button class="ltv-row" data-open-client="${x.c.id}"><span class="rank">${i + 1}</span><span class="n">${esc(x.c.name)}<small>${esc((curPlan(x.c.id) && planName(curPlan(x.c.id))) || CST[statusOf(x.c)])}</small></span><b class="num">${money(x.got)}</b></button>`
+                )
+                .join("")}</div>`
+            : `<p class="cc-note">Fills up as payments come in.</p>`
+        }
+      </section>`;
+  }
+  function niceCeil(v) {
+    const p = Math.pow(10, Math.floor(Math.log10(v)));
+    for (const m of [1, 2, 2.5, 5, 10]) if (m * p >= v) return m * p;
+    return 10 * p;
   }
 
   function viewMore() {
     const s = S.session;
-    const standalone = window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+    const set = S.data.settings || {};
     const theme = pref("theme", "system");
+    const pushSupported = "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
     return `
-      ${topbar("Settings")}
+      <div class="topbar"><button class="back" data-action="close-settings">${ic("left")} Back</button><div class="title">Settings</div><div style="width:70px"></div></div>
       <div class="group-title">Account</div>
       <div class="group rise" style="--i:0">
         <button class="row" data-action="edit-name"><span class="ic">${ic("user")}</span><span class="l">${esc(s.name || "Add your name")}<small>${esc(s.email || "")}</small></span><span class="r">${ic("right")}</span></button>
         <button class="row" data-action="password"><span class="ic">${ic("key")}</span><span class="l">Change password</span><span class="r">${ic("right")}</span></button>
       </div>
 
-      <div class="group-title">Appearance</div>
+      <div class="group-title">Goals &amp; messages</div>
       <div class="group rise" style="--i:1">
+        <button class="row" data-action="goal"><span class="ic">${ic("target")}</span><span class="l">Goals<small>${set.goalMonthly ? `${money(set.goalMonthly)} a month` : "No monthly goal yet"}${set.goalClients ? ` · ${set.goalClients} clients` : ""}</small></span><span class="r">${ic("right")}</span></button>
+        <button class="row" data-action="template"><span class="ic">${ic("chat")}</span><span class="l">Chase message<small>What gets sent when you chase a late payment</small></span><span class="r">${ic("right")}</span></button>
+      </div>
+
+      <div class="group-title">Morning nudge</div>
+      <div class="group rise" style="--i:2">
+        ${
+          !pushSupported
+            ? `<div class="row"><span class="ic">${ic("bell")}</span><span class="l">Not available here<small>${isIOS() && !isStandalone() ? "Open TS Pay from your Home Screen to turn this on." : "This browser can't show notifications."}</small></span></div>`
+            : `<label class="row"><span class="ic">${ic("bell")}</span><span class="l">Morning nudge<small>A heads-up on days a payment's due, didn't land, or a plan ends. Also puts a count on the app icon.</small></span>
+                 <span class="switch"><input type="checkbox" id="nudgeToggle" ${set.nudgeOn && S.pushHere ? "checked" : ""}><i></i></span></label>
+               <label class="row"><span class="ic">${ic("clock")}</span><span class="l">Time</span>
+                 <select class="pick" id="nudgeHour" style="flex:0 0 auto;width:auto">${[6, 7, 8, 9, 10]
+                   .map((h) => `<option value="${h}" ${Number(set.nudgeHour) === h ? "selected" : ""}>${h}:00am</option>`)
+                   .join("")}</select></label>
+               ${set.nudgeOn && S.pushHere ? `<button class="row" data-action="push-test"><span class="ic">${ic("bell")}</span><span class="l">Send a test now</span><span class="r">${ic("right")}</span></button>` : ""}`
+        }
+      </div>
+
+      <div class="group-title">Appearance</div>
+      <div class="group rise" style="--i:3">
         <div class="row stack"><span class="ic">${ic("moon")}</span><span class="l">Theme<small>System follows your iPhone's light/dark setting</small></span>
           <div class="seg small full" data-seg="theme" style="margin-top:6px">
             ${["system", "light", "dark"].map((t) => `<button class="${theme === t ? "on" : ""}" data-theme-set="${t}">${t[0].toUpperCase() + t.slice(1)}</button>`).join("")}
@@ -1056,7 +1442,7 @@
       </div>
 
       <div class="group-title">Face ID</div>
-      <div class="group rise" style="--i:2">
+      <div class="group rise" style="--i:4">
         ${
           s.hasPasskey
             ? `<div class="row"><span class="ic">${ic("faceid")}</span><span class="l">Face ID is on<small>Works on any device using your iCloud Keychain</small></span></div>
@@ -1072,13 +1458,14 @@
       </div>
 
       <div class="group-title">Export</div>
-      <div class="group rise" style="--i:3">
+      <div class="group rise" style="--i:5">
         <a class="row" href="${API}/export?type=payments"><span class="ic">${ic("download")}</span><span class="l">Payments CSV<small>Every payment, with status and paid date</small></span></a>
         <a class="row" href="${API}/export?type=clients"><span class="ic">${ic("download")}</span><span class="l">Clients CSV</span></a>
+        <a class="row" href="${API}/export?type=plans"><span class="ic">${ic("download")}</span><span class="l">Plans CSV<small>Everyone's plan history</small></span></a>
       </div>
 
       ${
-        standalone
+        isStandalone()
           ? ""
           : `<div class="group-title">Make it an app</div>
       <div class="group"><div class="row"><span class="ic">${ic("share")}</span><span class="l">Add to Home Screen<small>In Safari, tap Share, then "Add to Home Screen". It opens full screen like a normal app.</small></span></div></div>`
@@ -1096,7 +1483,7 @@
     ["calendar", "cal", "Calendar"],
     ["add", "plus", ""],
     ["clients", "users", "Clients"],
-    ["more", "more", "Settings"],
+    ["growth", "trend", "Growth"],
   ];
   function renderShell() {
     root().innerHTML = `<div class="app">
@@ -1112,8 +1499,13 @@
   function moveTabIndicator(instant) {
     const t = $(`.tab[data-tab="${S.tab}"]`);
     const ind = $("#tabInd");
-    if (!t || !ind) return;
     $$(".tab[data-tab]").forEach((x) => x.classList.toggle("on", x === t));
+    if (!ind) return;
+    if (!t) {
+      ind.style.opacity = "0";
+      return;
+    }
+    ind.style.opacity = "1";
     if (instant) ind.style.transition = "none";
     ind.style.width = t.offsetWidth - 8 + "px";
     ind.style.transform = `translateX(${t.offsetLeft + 4}px)`;
@@ -1150,7 +1542,7 @@
     });
   }
 
-  // mode: "fade" (tab change), "push"/"pop" (client profile), or undefined (data refresh, stay put)
+  // mode: "fade" (tab change), "push"/"pop" (profile / settings), or undefined (data refresh, stay put)
   function render(mode) {
     if (!S.data) return;
     let first = false;
@@ -1160,7 +1552,7 @@
     }
     const v = $("#view");
     const y = window.scrollY;
-    const views = { month: viewMonth, calendar: viewCalendar, clients: viewClients, more: viewMore };
+    const views = { month: viewMonth, calendar: viewCalendar, clients: viewClients, growth: viewGrowth, more: viewMore };
     v.className = "view";
     v.innerHTML = views[S.tab]();
     if (mode) {
@@ -1176,11 +1568,9 @@
     }
     if (S.tab === "clients" && !S.clientId) renderClientList();
     layoutSegs();
-    // progress bar + lime tile shimmer + counters
-    const fill = $(".progress .fill");
     const prevRecv = S.counts.recv ?? 0;
     requestAnimationFrame(() => {
-      if (fill) fill.style.width = fill.dataset.pct + "%";
+      $$(".progress .fill").forEach((f) => (f.style.width = f.dataset.pct + "%"));
       const rt = $("#recvTile");
       if (rt && Number($("[data-count=recv]", rt)?.dataset.val) > prevRecv) rt.classList.add("shine");
       runCounts();
@@ -1194,12 +1584,21 @@
   // ---------- sheets: payments ----------
   function clientOptions(sel) {
     const cs = S.data.clients;
-    const act = cs.filter((c) => c.status === "active");
-    const rest = cs.filter((c) => c.status !== "active");
+    const act = cs.filter((c) => statusOf(c) !== "finished");
+    const rest = cs.filter((c) => statusOf(c) === "finished");
     const o = (c) => `<option value="${c.id}" ${String(sel) === String(c.id) ? "selected" : ""}>${esc(c.name)}</option>`;
     return `<option value="" ${sel ? "" : "selected"} disabled>Choose a client</option>${act.map(o).join("")}${
-      rest.length ? `<optgroup label="Paused or finished">${rest.map(o).join("")}</optgroup>` : ""
+      rest.length ? `<optgroup label="Finished">${rest.map(o).join("")}</optgroup>` : ""
     }`;
+  }
+  function paymentDefaults(c) {
+    const p = c ? curPlan(c.id) || plansOf(c.id).filter((x) => x.kind !== "break").pop() : null;
+    return {
+      package: p && p.kind !== "break" ? p.kind : "coaching",
+      programme_weeks: p?.programme_weeks || null,
+      amount_pence: p && p.kind !== "break" && p.price_pence ? (p.billing === "split" ? Math.round(p.price_pence / p.instalments) : p.price_pence) : null,
+      method: p?.method || "manual",
+    };
   }
 
   function paymentSheet(p, preset = {}) {
@@ -1213,22 +1612,20 @@
     if (isEdit) f = { ...p };
     else {
       const c = preset.client_id ? client(preset.client_id) : null;
-      f = {
-        client_id: c?.id || "",
-        package: c?.package || "coaching",
-        programme_weeks: c?.programme_weeks || null,
-        amount_pence: c ? c.price_pence : null,
-        method: c?.method || "manual",
-        due_date: preset.due_date || today,
-        paid_date: null,
-        notes: "",
-      };
+      f = { client_id: c?.id || "", ...paymentDefaults(c), due_date: preset.due_date || today, paid_date: null, notes: "" };
     }
-    const sch = isEdit && p.schedule_id ? S.smap.get(p.schedule_id) : null;
+    const plan = isEdit && p.plan_id ? planOf(p.plan_id) : null;
     const st = isEdit ? stOf(p) : null;
     const html = `
       <form class="form" id="payForm" novalidate>
-        <div class="field"><label for="p-client">Client</label><select id="p-client">${clientOptions(f.client_id)}</select></div>
+        ${
+          plan
+            ? `<div class="from-plan">${ic("repeat")}<span>From ${esc(firstName(cname(p)))}'s plan: <b>${esc(planName(plan))} · ${esc(planPrice(plan))}</b><br><small>Changes here only affect this one payment.</small></span></div>`
+            : !isEdit
+            ? `<p class="hint">For a one-off or extra. Regular payments come from the client's plan automatically.</p>`
+            : ""
+        }
+        <div class="field"><label for="p-client">Client</label><select id="p-client" ${plan ? "disabled" : ""}>${clientOptions(f.client_id)}</select></div>
         <div class="field"><span class="lab">Package</span>${opts("package", PKG, f.package)}</div>
         <div class="field" id="p-weeks-f" ${f.package === "programme" ? "" : "hidden"}><span class="lab">Programme length</span>${opts("weeks", WEEK_OPTS, f.programme_weeks)}</div>
         <div class="two">
@@ -1237,28 +1634,19 @@
         </div>
         <div class="field"><span class="lab">Payment method</span>${opts("method", METH, f.method)}</div>
         ${
-          !isEdit
-            ? `<label class="switch-row"><span class="l">Repeat monthly<small id="p-rep-hint">Adds a new payment on the same date each month until you stop it</small></span><span class="switch"><input type="checkbox" id="p-repeat"><i></i></span></label>`
-            : sch
-            ? `<div class="subcard"><h4>${sch.active ? `Repeats monthly on the ${ordinal(sch.day_of_month)}` : "Monthly repeat stopped"}</h4>${
-                sch.active
-                  ? `<div class="hint" style="padding:0">Changes here only affect this one payment.</div><div class="btn-row"><button type="button" class="btn sm ghost" data-sched-edit="${sch.id}" style="width:100%">Edit repeat</button><button type="button" class="btn sm danger" id="p-sched-stop" style="width:100%">Stop repeating</button></div>`
-                  : ""
-              }</div>`
-            : ""
-        }
-        ${
           isEdit
             ? `<div class="status-card ${st}"><div class="l"><b>${STL[st]}</b><small>${
                 st === "paid" ? `Received ${fmtLong(p.paid_date)}` : st === "overdue" ? `${daysBetween(p.due_date, today)} days past due` : `Due ${fmtLong(p.due_date)}`
-              }</small></div><span class="switch"><input type="checkbox" id="p-paid" ${p.paid_date ? "checked" : ""} aria-label="Paid"><i></i></span></div>
-               <div class="field" id="p-paid-f" ${p.paid_date ? "" : "hidden"}><label for="p-paiddate">Date received</label><input id="p-paiddate" type="date" value="${p.paid_date || today}"></div>`
+              }${p.chase_count && !p.paid_date ? ` · chased ${p.chase_count}× (last ${ago(p.chased_at)})` : ""}</small></div><span class="switch"><input type="checkbox" id="p-paid" ${p.paid_date ? "checked" : ""} aria-label="Paid"><i></i></span></div>
+               <div class="field" id="p-paid-f" ${p.paid_date ? "" : "hidden"}><label for="p-paiddate">Date received</label><input id="p-paiddate" type="date" value="${p.paid_date || today}"></div>
+               ${!p.paid_date ? `<button type="button" class="btn ghost" data-chase="${p.id}">${ic("chat")} Chase this payment</button>` : ""}`
             : ""
         }
         <div class="field"><label for="p-notes">Notes <span>optional</span></label><textarea id="p-notes" rows="2">${esc(f.notes)}</textarea></div>
         <div class="form-err" id="p-err"></div>
         <button class="btn lime" type="submit">${isEdit ? "Save changes" : "Add payment"}</button>
         ${isEdit ? `<button class="btn danger" type="button" id="p-del">Delete this payment</button>` : ""}
+        ${plan ? `<button class="linkish center" type="button" data-open-client="${p.client_id}" data-close-sheet>View ${esc(firstName(cname(p)))}'s plans</button>` : ""}
       </form>`;
     openSheet(isEdit ? `${cname(p)} · ${money(p.amount_pence)}` : "Add payment", html, (sh) => {
       const weeksF = $("#p-weeks-f", sh);
@@ -1267,27 +1655,18 @@
       });
       if (!isEdit) {
         $("#p-client", sh).addEventListener("change", (e) => {
-          const c = client(Number(e.target.value));
-          if (!c) return;
+          const d = paymentDefaults(client(Number(e.target.value)));
           const set = (name, v) => {
             const g = $(`[data-name="${name}"]`, sh);
             g.dataset.value = v ?? "";
             $$(".opt", g).forEach((b) => b.classList.toggle("on", b.dataset.val === String(v)));
           };
-          set("package", c.package);
-          set("weeks", c.programme_weeks);
-          set("method", c.method);
-          weeksF.hidden = c.package !== "programme";
-          $("#p-amt", sh).value = moneyInput(c.price_pence);
+          set("package", d.package);
+          set("weeks", d.programme_weeks);
+          set("method", d.method);
+          weeksF.hidden = d.package !== "programme";
+          $("#p-amt", sh).value = moneyInput(d.amount_pence);
         });
-        const hint = () => {
-          const d = $("#p-due", sh).value;
-          $("#p-rep-hint", sh).textContent = d
-            ? `Adds a payment on the ${ordinal(Number(d.slice(8, 10)))} of every month until you stop it`
-            : "Adds a new payment on the same date each month until you stop it";
-        };
-        $("#p-due", sh).addEventListener("change", hint);
-        hint();
       } else {
         const paid = $("#p-paid", sh);
         paid.addEventListener("change", () => ($("#p-paid-f", sh).hidden = !paid.checked));
@@ -1303,8 +1682,6 @@
             fail(e);
           }
         };
-        const ss = $("#p-sched-stop", sh);
-        if (ss) ss.onclick = () => stopSchedule(sch);
       }
       $("#payForm", sh).onsubmit = async (e) => {
         e.preventDefault();
@@ -1322,12 +1699,7 @@
         if (!body.client_id) return (err.textContent = "Choose a client.");
         if (body.amount_pence == null) return (err.textContent = "Enter the amount in pounds, e.g. 160 or 42.50.");
         if (!body.due_date) return (err.textContent = "Pick a due date.");
-        if (body.package === "programme" && !body.programme_weeks) return (err.textContent = "Pick the programme length.");
         if (isEdit) body.paid_date = $("#p-paid", sh).checked ? $("#p-paiddate", sh).value || today : null;
-        else body.repeat = $("#p-repeat", sh).checked;
-        if (!isEdit && body.repeat && client(body.client_id)?.status !== "active") {
-          return (err.textContent = "Repeats only run for active clients. Set the client to Active first.");
-        }
         const btn = $("button[type=submit]", sh);
         btn.disabled = true;
         try {
@@ -1336,73 +1708,13 @@
           closeSheet();
           rerender();
           haptic();
-          toast(isEdit ? "Saved" : body.repeat ? "Payment added, repeating monthly" : "Payment added");
+          toast(isEdit ? "Saved" : "Payment added");
         } catch (e2) {
           btn.disabled = false;
           if (!e2.silent) err.textContent = e2.message;
         }
       };
     });
-  }
-
-  function scheduleSheet(sch) {
-    const c = client(sch.client_id);
-    const days = Array.from({ length: 31 }, (_, i) => i + 1);
-    const html = `
-      <form class="form" id="schForm">
-        <p class="hint">Monthly repeat for <b>${esc(c?.name || "")}</b>. Updates this and upcoming unpaid payments. Anything already paid stays exactly as it was.</p>
-        <div class="field"><span class="lab">Package</span>${opts("package", PKG, sch.package)}</div>
-        <div class="field" id="s-weeks-f" ${sch.package === "programme" ? "" : "hidden"}><span class="lab">Programme length</span>${opts("weeks", WEEK_OPTS, sch.programme_weeks)}</div>
-        <div class="two">
-          <div class="field"><label for="s-amt">Amount</label><div class="money"><span>£</span><input id="s-amt" inputmode="decimal" value="${moneyInput(sch.amount_pence)}"></div></div>
-          <div class="field"><label for="s-day">Day of month</label><select id="s-day">${days
-            .map((d) => `<option value="${d}" ${d === sch.day_of_month ? "selected" : ""}>${ordinal(d)}</option>`)
-            .join("")}</select></div>
-        </div>
-        <p class="hint">In shorter months, days like the 31st fall on the last day of the month.</p>
-        <div class="field"><span class="lab">Payment method</span>${opts("method", METH, sch.method)}</div>
-        <div class="form-err" id="s-err"></div>
-        <button class="btn lime" type="submit">Save repeat</button>
-        <button class="btn danger" type="button" id="s-stop">Stop repeating</button>
-      </form>`;
-    openSheet("Monthly repeat", html, (sh) => {
-      $('[data-name="package"]', sh).addEventListener("change", (e) => ($("#s-weeks-f", sh).hidden = e.currentTarget.dataset.value !== "programme"));
-      $("#s-stop", sh).onclick = () => stopSchedule(sch);
-      $("#schForm", sh).onsubmit = async (e) => {
-        e.preventDefault();
-        const body = {
-          package: val(sh, "package"),
-          programme_weeks: val(sh, "weeks") ? Number(val(sh, "weeks")) : null,
-          amount_pence: parseMoney($("#s-amt", sh).value),
-          day_of_month: Number($("#s-day", sh).value),
-          method: val(sh, "method"),
-        };
-        if (body.amount_pence == null) return ($("#s-err", sh).textContent = "Enter a valid amount.");
-        try {
-          const r = await api(`/schedules/${sch.id}`, { method: "PUT", body });
-          setData(r.data);
-          closeSheet();
-          rerender();
-          toast("Repeat updated");
-        } catch (e2) {
-          if (!e2.silent) $("#s-err", sh).textContent = e2.message;
-        }
-      };
-    });
-  }
-
-  async function stopSchedule(sch) {
-    const c = client(sch.client_id);
-    if (!confirm(`Stop the monthly repeat for ${c?.name || "this client"}? Upcoming unpaid repeats are removed. Anything already due stays on the books.`)) return;
-    try {
-      const r = await api(`/schedules/${sch.id}/stop`, { method: "POST" });
-      setData(r.data);
-      closeSheet();
-      rerender();
-      toast("Repeat stopped");
-    } catch (e) {
-      fail(e);
-    }
   }
 
   async function quickPay(id) {
@@ -1461,50 +1773,699 @@
     );
   }
 
+  // ---------- chasing ----------
+  function waNumber(phone) {
+    let d = String(phone).replace(/[^\d+]/g, "");
+    if (d.startsWith("+")) d = d.slice(1);
+    else if (d.startsWith("00")) d = d.slice(2);
+    else if (d.startsWith("0")) d = "44" + d.slice(1);
+    return d.replace(/\D/g, "");
+  }
+  function chaseMessage(p) {
+    const c = client(p.client_id);
+    const tpl = S.data.settings?.chaseTemplate || "";
+    const plan = p.plan_id ? planOf(p.plan_id) : null;
+    const pkg = (plan ? planName(plan) : pkgText(p.package, p.programme_weeks)).toLowerCase().replace(/^pt only$/, "PT");
+    const vals = {
+      first: firstName(c?.name) || "there",
+      name: c?.name || "",
+      amount: money(p.amount_pence),
+      date: fmtShort(p.due_date),
+      package: pkg,
+      me: S.session?.name || "",
+    };
+    return tpl.replace(/\{(first|name|amount|date|package|me)\}/g, (_, k) => vals[k]);
+  }
+  function logChase(id) {
+    fetch(`${API}/payments/${id}/chase`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}", keepalive: true, credentials: "same-origin" })
+      .then((r) => r.json())
+      .then((j) => {
+        const p = S.data.payments.find((x) => x.id === id);
+        if (p && j.ok) {
+          p.chase_count = j.chase_count;
+          p.chased_at = j.chased_at;
+          const card = $(`.chase-card[data-cid="${id}"] .cc-chased`);
+          if (card) card.textContent = `Chased ${j.chase_count > 1 ? j.chase_count + "× · " : ""}${ago(j.chased_at)}`;
+          if (!sheet) rerender();
+        }
+      })
+      .catch(() => {});
+  }
+  function chaseSheet(list) {
+    const today = londonToday();
+    const ps = (list || S.data.payments.filter((p) => !p.paid_date && p.due_date < today)).slice().sort((a, b) => (a.due_date < b.due_date ? -1 : 1));
+    if (!ps.length) return toast("Nothing overdue to chase.");
+    const canShare = !!navigator.share;
+    const html = `
+      <p class="hint">${list && list.length === 1 ? "" : `${plural(ps.length, "payment")} · ${money(sum(ps))} overdue. `}Tap how you want to send it. Your message opens ready to go, you just hit send.</p>
+      <div class="chase-list">${ps
+        .map((p) => {
+          const c = client(p.client_id);
+          const phone = (c?.phone || "").trim();
+          const msg = chaseMessage(p);
+          const late = daysBetween(p.due_date, today);
+          return `<div class="chase-card" data-cid="${p.id}">
+            <div class="cc-top"><span class="av">${esc(initials(c?.name))}</span>
+              <span class="cc-n"><b>${esc(c?.name || "")}</b><small>${money(p.amount_pence)} · due ${fmtShort(p.due_date)}${late > 0 ? ` · ${late}d late` : ""}</small></span>
+              <button class="paybtn sm" data-pay="${p.id}" aria-label="Mark paid">${ic("check")}</button></div>
+            <p class="cc-msg">${esc(msg)}</p>
+            <p class="cc-chased">${p.chase_count ? `Chased ${p.chase_count > 1 ? p.chase_count + "× · " : ""}${ago(p.chased_at)}` : "Not chased yet"}</p>
+            <div class="cc-acts">
+              ${
+                phone
+                  ? `<a class="btn sm lime" data-log-chase="${p.id}" href="https://wa.me/${waNumber(phone)}?text=${encodeURIComponent(msg)}" target="_blank" rel="noopener">${ic("chat")} WhatsApp</a>
+                     <a class="btn sm ghost" data-log-chase="${p.id}" href="sms:${phone.replace(/[^\d+]/g, "")}${isIOS() ? "&" : "?"}body=${encodeURIComponent(msg)}">${ic("phone")} Text</a>`
+                  : `<button class="btn sm ghost" data-action="edit-client" data-client="${c?.id}">${ic("plus")} Add their number</button>`
+              }
+              ${canShare ? `<button class="btn sm ghost" data-share-chase="${p.id}">${ic("share")}</button>` : `<button class="btn sm ghost" data-copy-chase="${p.id}">${ic("copy")}</button>`}
+            </div>
+          </div>`;
+        })
+        .join("")}</div>
+      <button class="linkish center" data-action="template">Edit the message</button>`;
+    openSheet(list && list.length === 1 ? "Chase payment" : "Chase list", html, (sh) => {
+      sh.addEventListener("click", async (e) => {
+        const a = e.target.closest("[data-log-chase]");
+        if (a) {
+          haptic();
+          logChase(Number(a.dataset.logChase));
+          return; // let the link open WhatsApp / Messages
+        }
+        const s = e.target.closest("[data-share-chase]");
+        if (s) {
+          const p = S.data.payments.find((x) => x.id === Number(s.dataset.shareChase));
+          try {
+            await navigator.share({ text: chaseMessage(p) });
+            logChase(p.id);
+          } catch {}
+          return;
+        }
+        const cp = e.target.closest("[data-copy-chase]");
+        if (cp) {
+          const p = S.data.payments.find((x) => x.id === Number(cp.dataset.copyChase));
+          try {
+            await navigator.clipboard.writeText(chaseMessage(p));
+            toast("Message copied");
+            logChase(p.id);
+          } catch {
+            toast("Couldn't copy on this device");
+          }
+        }
+      });
+    });
+  }
+
+  function templateSheet() {
+    const set = S.data.settings || {};
+    const sample = S.data.payments.find((p) => !p.paid_date) || { client_id: S.data.clients[0]?.id, amount_pence: 16000, due_date: londonToday(), package: "coaching" };
+    openSheet(
+      "Chase message",
+      `<form class="form" id="tplForm">
+        <div class="field"><label for="tpl">Message</label><textarea id="tpl" rows="6">${esc(set.chaseTemplate || "")}</textarea></div>
+        <p class="hint">These fill in automatically: <code>{first}</code> first name · <code>{amount}</code> · <code>{date}</code> due date · <code>{package}</code> · <code>{me}</code> your name</p>
+        <div class="subcard"><h4>Preview</h4><p class="cc-msg" id="tplPrev"></p></div>
+        <div class="form-err" id="tpl-err"></div>
+        <button class="btn lime" type="submit">Save message</button>
+      </form>`,
+      (sh) => {
+        const upd = () => {
+          const saved = S.data.settings.chaseTemplate;
+          S.data.settings.chaseTemplate = $("#tpl", sh).value;
+          $("#tplPrev", sh).textContent = sample.client_id ? chaseMessage(sample) : $("#tpl", sh).value;
+          S.data.settings.chaseTemplate = saved;
+        };
+        $("#tpl", sh).addEventListener("input", upd);
+        upd();
+        $("#tplForm", sh).onsubmit = async (e) => {
+          e.preventDefault();
+          try {
+            const r = await api("/settings", { method: "POST", body: { chaseTemplate: $("#tpl", sh).value } });
+            S.data.settings = r.settings;
+            closeSheet();
+            rerender();
+            toast("Message saved");
+          } catch (e2) {
+            if (!e2.silent) $("#tpl-err", sh).textContent = e2.message;
+          }
+        };
+      }
+    );
+  }
+
+  function goalSheet() {
+    const set = S.data.settings || {};
+    openSheet(
+      "Goals",
+      `<form class="form" id="goalForm">
+        <div class="field"><label for="g1">Monthly income goal</label><div class="money"><span>£</span><input id="g1" inputmode="decimal" value="${moneyInput(set.goalMonthly || "")}" placeholder="e.g. 3000"></div></div>
+        <div class="field"><label for="g2">Client goal <span>active clients</span></label><input id="g2" inputmode="numeric" value="${set.goalClients || ""}" placeholder="e.g. 15"></div>
+        <p class="hint">Leave either blank to hide it.</p>
+        <div class="form-err" id="g-err"></div>
+        <button class="btn lime" type="submit">Save goals</button>
+      </form>`,
+      (sh) => {
+        $("#goalForm", sh).onsubmit = async (e) => {
+          e.preventDefault();
+          const g1 = $("#g1", sh).value.trim();
+          const g2 = $("#g2", sh).value.trim();
+          const goalMonthly = g1 ? parseMoney(g1) : 0;
+          const goalClients = g2 ? Number(g2) : 0;
+          if (goalMonthly == null) return ($("#g-err", sh).textContent = "Enter the goal in pounds, e.g. 3000.");
+          if (!Number.isInteger(goalClients) || goalClients < 0) return ($("#g-err", sh).textContent = "Enter a whole number of clients.");
+          try {
+            const r = await api("/settings", { method: "POST", body: { goalMonthly, goalClients } });
+            S.data.settings = r.settings;
+            closeSheet();
+            rerender();
+            haptic();
+            toast("Goals saved");
+          } catch (e2) {
+            if (!e2.silent) $("#g-err", sh).textContent = e2.message;
+          }
+        };
+      }
+    );
+  }
+
+  // ---------- plan form (shared by add client, change plan, fix plan) ----------
+  // F holds the form's values; the form re-draws itself when "what" or "how they pay" changes.
+  function planDefaults(c, kind, start) {
+    const prevSame = c ? plansOf(c.id).filter((p) => p.kind === kind).pop() : null;
+    const base = prevSame || (c ? plansOf(c.id).filter((p) => p.kind !== "break").pop() : null);
+    const billing = prevSame ? prevSame.billing : kind === "programme" ? "upfront" : "monthly";
+    const day = base?.day_of_month || null;
+    const first = billing === "monthly" && day ? nextOnDay(day, start) : start;
+    return {
+      kind,
+      billing,
+      price: prevSame ? moneyInput(prevSame.price_pence) : kind === base?.kind ? moneyInput(base?.price_pence) : "",
+      weeks: prevSame?.programme_weeks || (kind === "programme" ? 12 : null),
+      instalments: prevSame?.instalments || 3,
+      method: base?.method || "manual",
+      start_date: start,
+      first_due: first,
+      end_date: "",
+      until: false,
+      sessions: prevSame?.sessions_per_week || "",
+      minutes: prevSame?.session_minutes || 60,
+      hours: prevSame && !prevSame.sessions_per_week ? prevSame.hours_per_month || "" : "",
+    };
+  }
+  function planFormHTML(F, mode) {
+    // mode: "add" (new client), "change" (switch from a date), "edit" (fix in place)
+    if (F.kind === "break") {
+      return `
+        <div class="two">
+          <div class="field"><label for="f-start">Break starts</label><input id="f-start" type="date" data-f="start_date" value="${F.start_date}"></div>
+          <div class="field"><label for="f-end">Back on</label><input id="f-end" type="date" data-f="end_back" value="${F.end_date ? addDays(F.end_date, 1) : ""}" ${F.until ? "" : "disabled"}></div>
+        </div>
+        <label class="switch-row"><span class="l">They know when they're back<small>${F.until ? "Pick the date they're back" : "Leave off if it's open-ended"}</small></span><span class="switch"><input type="checkbox" data-f="until" ${F.until ? "checked" : ""}><i></i></span></label>`;
+    }
+    const b = F.billing;
+    const priceLabel = b === "monthly" ? "Price per month" : b === "none" ? "Usual price per payment" : "Total price";
+    const firstLabel = b === "monthly" ? (mode === "add" ? "Next payment" : "First payment") : b === "upfront" ? "Payment due" : "First payment";
+    const showStart = mode !== "add" || F.kind === "programme";
+    const endAuto = F.kind === "programme" && F.weeks && b !== "monthly" && F.start_date;
+    const hoursBlock =
+      F.kind === "pt"
+        ? `<div class="two"><div class="field"><span class="lab">Sessions a week</span>
+             <div class="stepper" data-step="sessions"><button type="button" data-step-by="-0.5">${ic("minus")}</button><b>${F.sessions || 0}</b><button type="button" data-step-by="0.5">${ic("plus")}</button></div></div>
+             <div class="field"><label for="f-min">Session length</label><select id="f-min" data-f="minutes">${[30, 45, 60, 75, 90]
+               .map((m) => `<option value="${m}" ${Number(F.minutes) === m ? "selected" : ""}>${m} min</option>`)
+               .join("")}</select></div></div>
+           <p class="hint" id="f-hours-calc">${F.sessions ? `≈ ${Math.round(((F.sessions * F.minutes * 52) / 12 / 60) * 10) / 10} hours a month` : "Used for your £/hour. Optional."}</p>`
+        : `<div class="field"><label for="f-hours">Hours a month <span>check-ins, programming, messages</span></label><input id="f-hours" inputmode="decimal" data-f="hours" value="${esc(F.hours)}" placeholder="e.g. 4"></div>`;
+    return `
+      <div class="field"><span class="lab">How they pay</span>${
+        mode === "edit" ? `<p class="static">${BILL[b]}${b === "split" ? ` · ${F.instalments} payments` : ""}<small>To change how they pay, use Change plan.</small></p>` : opts("billing", BILL, b)
+      }</div>
+      ${F.kind === "programme" ? `<div class="field"><span class="lab">Programme length${b === "monthly" ? " <span>optional</span>" : ""}</span>${opts("weeks", WEEK_OPTS, F.weeks)}</div>` : ""}
+      <div class="${b === "split" && mode !== "edit" ? "two" : ""}">
+        <div class="field"><label for="f-price">${priceLabel}${b === "none" ? " <span>optional</span>" : ""}</label><div class="money"><span>£</span><input id="f-price" inputmode="decimal" data-f="price" value="${esc(F.price)}" placeholder="0"></div></div>
+        ${b === "split" && mode !== "edit" ? `<div class="field"><span class="lab">Payments</span>${opts("instalments", { 2: "2", 3: "3", 4: "4", 6: "6" }, F.instalments)}</div>` : ""}
+      </div>
+      ${
+        b === "split" && parseMoney(F.price) && F.instalments
+          ? `<p class="hint">${F.instalments} payments of about ${money(Math.round(parseMoney(F.price) / F.instalments))}, a month apart</p>`
+          : ""
+      }
+      <div class="${showStart && b !== "none" ? "two" : ""}">
+        ${showStart ? `<div class="field"><label for="f-start">${mode === "change" ? "Switches on" : "Starts"}</label><input id="f-start" type="date" data-f="start_date" value="${F.start_date}"></div>` : ""}
+        ${b !== "none" ? `<div class="field"><label for="f-first">${firstLabel}</label><input id="f-first" type="date" data-f="first_due" value="${F.first_due || ""}"></div>` : ""}
+      </div>
+      ${b === "monthly" && F.first_due ? `<p class="hint">Then on the ${ordinal(Number(mode === "edit" && F.day ? F.day : F.first_due.slice(8, 10)))} of each month${mode === "edit" ? "" : " until you change it"}.</p>` : ""}
+      ${mode === "edit" && b === "monthly" ? `<div class="field"><label for="f-day">Payment day</label><select id="f-day" data-f="day">${Array.from({ length: 31 }, (_, i) => i + 1)
+        .map((d) => `<option value="${d}" ${Number(F.day) === d ? "selected" : ""}>${ordinal(d)} of the month</option>`)
+        .join("")}</select></div>` : ""}
+      ${endAuto ? `<p class="hint">${F.weeks} weeks · ends ${fmtShort(addDays(F.start_date, F.weeks * 7 - 1))}</p>` : ""}
+      ${mode === "edit" && !endAuto ? `<div class="field"><label for="f-endd">Ends <span>optional</span></label><input id="f-endd" type="date" data-f="end_date" value="${F.end_date || ""}"></div>` : ""}
+      <div class="field"><span class="lab">Payment method</span>${opts("method", METH, F.method)}</div>
+      <details class="time-box" ${F.timeOpen || F.sessions || F.hours ? "open" : ""}><summary>${ic("clock")} Your time <span>for £/hour · optional</span></summary>${hoursBlock}</details>`;
+  }
+  function bindPlanForm(sh, F, box, mode, onChange) {
+    const redraw = () => {
+      box.innerHTML = planFormHTML(F, mode);
+      onChange && onChange();
+    };
+    box.addEventListener("input", (e) => {
+      const k = e.target.dataset.f;
+      if (!k) return;
+      if (k === "until") return;
+      if (k === "end_back") F.end_date = e.target.value ? addDays(e.target.value, -1) : "";
+      else F[k] = e.target.value;
+      if (k === "start_date" && mode !== "edit" && F.billing !== "monthly") F.first_due = F.start_date;
+      if (k === "start_date" && mode !== "edit" && F.billing === "monthly") {
+        const d = Number((F.first_due || F.start_date).slice(8, 10));
+        F.first_due = nextOnDay(d, F.start_date);
+        const fd = $("#f-first", box);
+        if (fd) fd.value = F.first_due;
+      }
+      onChange && onChange();
+    });
+    box.addEventListener("change", (e) => {
+      const t = e.target;
+      if (t.dataset.f === "until") {
+        F.until = t.checked;
+        if (!F.until) F.end_date = "";
+        return redraw();
+      }
+      if (t.dataset.f === "minutes") {
+        F.minutes = Number(t.value);
+        return redraw();
+      }
+      if (t.dataset.f && ["first_due", "start_date", "day"].includes(t.dataset.f)) return redraw();
+      const g = t.closest?.(".opts") || (t.classList?.contains("opts") ? t : null);
+      if (g) {
+        const name = g.dataset.name;
+        const v = g.dataset.value;
+        if (name === "billing") {
+          F.billing = v;
+          if (v !== "monthly" && !F.first_due) F.first_due = F.start_date;
+        } else if (name === "weeks") F.weeks = Number(v);
+        else if (name === "instalments") F.instalments = Number(v);
+        else if (name === "method") F.method = v;
+        return redraw();
+      }
+    });
+    box.addEventListener("click", (e) => {
+      const sum = e.target.closest("summary");
+      if (sum) F.timeOpen = !sum.parentElement.open;
+      const b = e.target.closest("[data-step-by]");
+      if (!b) return;
+      F.sessions = Math.max(0, Math.min(14, (Number(F.sessions) || 0) + Number(b.dataset.stepBy)));
+      redraw();
+    });
+    redraw();
+  }
+  // options change fires on the .opts element itself
+  function planPayload(F, mode) {
+    if (F.kind === "break") return { kind: "break", start_date: F.start_date, end_date: F.until && F.end_date ? F.end_date : null };
+    const price = F.billing === "none" && !String(F.price).trim() ? 0 : parseMoney(F.price);
+    const out = {
+      kind: F.kind,
+      billing: F.billing,
+      price_pence: price,
+      programme_weeks: F.kind === "programme" && F.weeks ? Number(F.weeks) : null,
+      instalments: F.billing === "split" ? Number(F.instalments) : null,
+      method: F.method,
+      start_date: F.start_date,
+      first_due: F.billing === "none" ? null : F.first_due || F.start_date,
+      end_date: F.end_date || null,
+      notes: F.notes || "",
+    };
+    if (F.kind === "programme" && F.weeks && F.billing !== "monthly" && F.start_date) out.end_date = addDays(F.start_date, Number(F.weeks) * 7 - 1);
+    if (F.billing === "monthly") out.day_of_month = mode === "edit" && F.day ? Number(F.day) : Number(out.first_due.slice(8, 10));
+    if (F.kind === "pt" && Number(F.sessions)) {
+      out.sessions_per_week = Number(F.sessions);
+      out.session_minutes = Number(F.minutes) || 60;
+      out.hours_per_month = null;
+    } else if (F.kind !== "pt" && String(F.hours).trim()) {
+      out.hours_per_month = Number(String(F.hours).replace(",", "."));
+      out.sessions_per_week = null;
+      out.session_minutes = null;
+    } else {
+      out.hours_per_month = null;
+      out.sessions_per_week = null;
+      out.session_minutes = null;
+    }
+    return out;
+  }
+  function planProblem(F) {
+    if (F.kind === "break") {
+      if (!F.start_date) return "Pick when the break starts.";
+      if (F.until && !F.end_date) return "Pick when they're back, or switch that off.";
+      if (F.until && F.end_date < F.start_date) return "They can't be back before the break starts.";
+      return "";
+    }
+    if (F.billing !== "none" && !parseMoney(F.price)) return "Enter the price in pounds, e.g. 160.";
+    if (F.billing === "none" && String(F.price).trim() && parseMoney(F.price) == null) return "Enter the price in pounds, e.g. 40.";
+    if (F.kind === "programme" && F.billing !== "monthly" && !F.weeks) return "Pick the programme length.";
+    if (!F.start_date) return "Pick a start date.";
+    if (F.billing !== "none" && !F.first_due) return "Pick the payment date.";
+    if (F.end_date && F.end_date < F.start_date) return "The end date is before the start date.";
+    return "";
+  }
+
+  // ---------- change plan ----------
+  function changePlanSheet(c, from) {
+    const today = londonToday();
+    const cp = curPlan(c.id);
+    const start = from && from > today ? from : from || today;
+    const kinds = { pt: "PT", coaching: "Full coaching", programme: "Programme", break: "Break", finish: "Finished" };
+    const icons = { pt: "user", coaching: "users", programme: "list", break: "pause", finish: "flag" };
+    let F = null;
+    let thenMode = "decide";
+    let finishDate = start;
+    const html = `
+      ${cp ? `<p class="now-line">Now: <b>${esc(planName(cp))}</b>${cp.kind !== "break" ? ` · ${esc(planPrice(cp))}` : ""}</p>` : `<p class="now-line">${plansOf(c.id).length ? "No plan right now" : "No plan yet"}</p>`}
+      <div class="field"><span class="lab">What are they switching to?</span>
+        <div class="kind-grid">${Object.entries(kinds)
+          .map(([k, l]) => `<button type="button" class="kind" data-kind="${k}">${ic(icons[k])}<span>${l}</span></button>`)
+          .join("")}</div></div>
+      <form class="form" id="cpForm" novalidate>
+        <div id="cpFields"></div>
+        <div id="cpThen"></div>
+        <div class="summary" id="cpSum" hidden></div>
+        <div class="form-err" id="cp-err"></div>
+        <button class="btn lime" type="submit" id="cpGo" disabled>Choose an option above</button>
+      </form>`;
+    openSheet(`Change ${firstName(c.name)}'s plan`, html, (sh) => {
+      const thenBox = $("#cpThen", sh);
+      const sumBox = $("#cpSum", sh);
+      const go = $("#cpGo", sh);
+      const prevFor = (s) => lastPaidPlanBefore(c.id, s || start);
+      const drawThen = () => {
+        if (!F || F.kind === "finish") return (thenBox.innerHTML = "");
+        const prev = prevFor(F.start_date);
+        const hasEnd = F.kind === "break" ? F.until && F.end_date : F.kind === "programme" && F.weeks && F.billing !== "monthly";
+        if (!hasEnd) {
+          thenBox.innerHTML = "";
+          return;
+        }
+        if (thenMode === "resume" && !prev) thenMode = "decide";
+        const label = F.kind === "break" ? "After the break" : "When it ends";
+        thenBox.innerHTML = `<div class="field"><span class="lab">${label}</span>${opts(
+          "then",
+          prev ? { resume: `Back to ${KIND_SHORT[prev.kind]} · ${planPrice(prev)}`, decide: "Ask me then" } : { decide: "Ask me then" },
+          thenMode
+        )}</div>`;
+      };
+      const summary = () => {
+        if (!F) return;
+        const lines = [];
+        const S0 = F.kind === "finish" ? addDays(finishDate, 1) : F.start_date;
+        const E = addDays(S0, -1);
+        const plans = plansOf(c.id);
+        for (const p of plans.filter((x) => x.start_date < S0 && (!x.end_date || x.end_date >= S0))) {
+          lines.push(`<li>${esc(planName(p))} ends ${fmtShort(E)}.</li>`);
+          const gone = S.data.payments.filter((x) => x.plan_id === p.id && x.auto && !x.paid_date && x.due_date > E);
+          if (gone.length) lines.push(`<li class="minus">Removes ${plural(gone.length, "upcoming payment")}: ${gone.slice(0, 3).map((g) => `${fmtDay(g.due_date)} ${money(g.amount_pence)}`).join(", ")}${gone.length > 3 ? "…" : ""}</li>`);
+        }
+        for (const p of plans.filter((x) => x.start_date >= S0)) lines.push(`<li class="minus">Replaces the ${esc(planName(p).toLowerCase())} planned from ${fmtShort(p.start_date)}.</li>`);
+        if (F.kind === "finish") {
+          lines.push(`<li>Marked as finished from ${fmtShort(finishDate)}.</li>`);
+        } else if (F.kind === "break") {
+          lines.push(`<li class="plus">Break from ${fmtShort(F.start_date)}${F.until && F.end_date ? `, back ${fmtShort(addDays(F.end_date, 1))}` : ", open-ended"}. No payments.</li>`);
+        } else {
+          const price = parseMoney(F.price) || 0;
+          const b = F.billing;
+          let pay = "";
+          if (b === "monthly") pay = F.first_due ? `${money(price)} on ${fmtShort(F.first_due)}, then the ${ordinal(Number(F.first_due.slice(8, 10)))} of each month` : "";
+          else if (b === "upfront") pay = `one payment of ${money(price)} due ${fmtShort(F.first_due || F.start_date)}`;
+          else if (b === "split") pay = `${F.instalments} payments of about ${money(Math.round(price / (F.instalments || 1)))} from ${fmtShort(F.first_due || F.start_date)}`;
+          else pay = "no automatic payments, you add them as they pay";
+          const nm = F.kind === "programme" && F.weeks ? `${F.weeks}-week programme` : KIND[F.kind];
+          lines.push(`<li class="plus">${esc(nm)} from ${fmtShort(F.start_date)}: ${pay}.</li>`);
+        }
+        const hasEnd = F.kind === "break" ? F.until && F.end_date : F.kind === "programme" && F.weeks && F.billing !== "monthly";
+        if (hasEnd) {
+          const end = F.kind === "break" ? F.end_date : addDays(F.start_date, F.weeks * 7 - 1);
+          const prev = prevFor(F.start_date);
+          if (thenMode === "resume" && prev) lines.push(`<li class="plus">Then back to ${esc(planName(prev))} · ${esc(planPrice(prev))} from ${fmtShort(addDays(end, 1))}.</li>`);
+          else lines.push(`<li>On ${fmtShort(end)} you'll be asked what's next.</li>`);
+        }
+        lines.push(`<li class="keep">Anything already paid, or due before ${fmtShort(S0)}, stays as it is.</li>`);
+        sumBox.hidden = false;
+        sumBox.innerHTML = `<h4>What happens</h4><ul>${lines.join("")}</ul>`;
+        go.disabled = false;
+        go.textContent = F.kind === "finish" ? "Mark as finished" : F.kind === "break" ? "Start break" : cp || plansOf(c.id).length ? "Switch plan" : "Set plan";
+      };
+      const pick = (kind) => {
+        $$(".kind", sh).forEach((k) => k.classList.toggle("on", k.dataset.kind === kind));
+        haptic();
+        if (kind === "finish") {
+          F = { kind: "finish" };
+          const fields = $("#cpFields", sh);
+          fields.innerHTML = `<div class="field"><label for="f-fin">Last day</label><input id="f-fin" type="date" value="${finishDate}"></div>
+            <p class="hint">Upcoming unpaid payments after this are removed. Anything they already owe stays, and their history is kept.</p>`;
+          $("#f-fin", fields).addEventListener("input", (e) => {
+            finishDate = e.target.value || today;
+            summary();
+          });
+          drawThen();
+          summary();
+          return;
+        }
+        F = planDefaults(c, kind, start);
+        if (kind === "break") {
+          F.until = true;
+          F.end_date = addDays(start, 29);
+          thenMode = prevFor(start) ? "resume" : "decide";
+        } else thenMode = "decide";
+        const fresh = document.createElement("div");
+        $("#cpFields", sh).replaceWith(fresh);
+        fresh.id = "cpFields";
+        bindPlanForm(sh, F, fresh, "change", () => {
+          drawThen();
+          summary();
+        });
+      };
+      $$(".kind", sh).forEach((k) => (k.onclick = () => pick(k.dataset.kind)));
+      thenBox.addEventListener("change", (e) => {
+        const g = e.target.closest(".opts");
+        if (g && g.dataset.name === "then") {
+          thenMode = g.dataset.value;
+          summary();
+        }
+      });
+      $("#cpForm", sh).onsubmit = async (e) => {
+        e.preventDefault();
+        const err = $("#cp-err", sh);
+        err.textContent = "";
+        if (!F) return;
+        go.disabled = true;
+        try {
+          let r;
+          if (F.kind === "finish") {
+            if (!confirm(`Mark ${c.name} as finished from ${fmtShort(finishDate)}?`)) return (go.disabled = false);
+            r = await api(`/clients/${c.id}/finish`, { method: "POST", body: { date: finishDate } });
+          } else {
+            const problem = planProblem(F);
+            if (problem) {
+              go.disabled = false;
+              return (err.textContent = problem);
+            }
+            const then = thenMode === "resume" ? { mode: "resume" } : { mode: "decide" };
+            r = await api(`/clients/${c.id}/plan`, { method: "POST", body: { plan: planPayload(F, "change"), then } });
+          }
+          setData(r.data);
+          closeSheet();
+          haptic();
+          rerender();
+          toast(F.kind === "finish" ? `${firstName(c.name)} marked as finished` : F.kind === "break" ? `${firstName(c.name)}'s break is set` : "Plan updated");
+        } catch (e2) {
+          go.disabled = false;
+          if (!e2.silent) err.textContent = e2.message;
+        }
+      };
+    });
+  }
+
+  // ---------- fix a plan in place ----------
+  function editPlanSheet(p) {
+    const c = client(p.client_id);
+    const F = {
+      kind: p.kind,
+      billing: p.billing,
+      price: moneyInput(p.price_pence),
+      weeks: p.programme_weeks,
+      instalments: p.instalments,
+      method: p.method,
+      start_date: p.start_date,
+      first_due: p.first_due,
+      day: p.day_of_month,
+      end_date: p.end_date || "",
+      until: !!p.end_date,
+      sessions: p.sessions_per_week || "",
+      minutes: p.session_minutes || 60,
+      hours: p.sessions_per_week ? "" : p.hours_per_month || "",
+      notes: p.notes || "",
+    };
+    const paid = S.data.payments.filter((x) => x.plan_id === p.id && x.paid_date).length;
+    const html = `
+      <form class="form" id="epForm" novalidate>
+        <p class="hint">Fixes this plan in place. Its unpaid payments update to match; paid ones never change. For a change from a date onwards (new price, new package), use <b>Change plan</b> instead.</p>
+        ${p.kind !== "break" ? `<div class="field"><span class="lab">What</span>${opts("kind", { pt: "PT", coaching: "Full coaching", programme: "Programme" }, p.kind)}</div>` : ""}
+        <div id="epFields"></div>
+        ${p.then_action === "decide" || p.end_date ? `<label class="switch-row"><span class="l">Ask me when it ends<small>Shows a "what's next?" card on the day</small></span><span class="switch"><input type="checkbox" id="ep-ask" ${p.then_action === "decide" ? "checked" : ""}><i></i></span></label>` : ""}
+        <div class="form-err" id="ep-err"></div>
+        <button class="btn lime" type="submit">Save plan</button>
+        ${paid ? "" : `<button class="btn danger" type="button" id="ep-del">Delete this plan</button>`}
+      </form>`;
+    openSheet(`${firstName(c?.name)}: ${planName(p)}`, html, (sh) => {
+      const box = $("#epFields", sh);
+      bindPlanForm(sh, F, box, "edit");
+      const kindG = $('[data-name="kind"]', sh);
+      if (kindG)
+        kindG.addEventListener("change", () => {
+          F.kind = kindG.dataset.value;
+          box.innerHTML = planFormHTML(F, "edit");
+        });
+      const del = $("#ep-del", sh);
+      if (del)
+        del.onclick = async () => {
+          if (!confirm("Delete this plan and its unpaid payments?")) return;
+          try {
+            const r = await api(`/plans/${p.id}`, { method: "DELETE" });
+            setData(r.data);
+            closeSheet();
+            rerender();
+            toast("Plan deleted");
+          } catch (e) {
+            fail(e);
+          }
+        };
+      $("#epForm", sh).onsubmit = async (e) => {
+        e.preventDefault();
+        const err = $("#ep-err", sh);
+        err.textContent = "";
+        const problem = planProblem(F);
+        if (problem) return (err.textContent = problem);
+        const body = planPayload(F, "edit");
+        if (p.kind === "break") body.end_date = F.until && F.end_date ? F.end_date : null;
+        const ask = $("#ep-ask", sh);
+        body.then_action = ask && ask.checked ? "decide" : null;
+        try {
+          const r = await api(`/plans/${p.id}`, { method: "PUT", body });
+          setData(r.data);
+          closeSheet();
+          haptic();
+          rerender();
+          toast("Plan saved");
+        } catch (e2) {
+          if (!e2.silent) err.textContent = e2.message;
+        }
+      };
+    });
+  }
+
+  async function resumeFrom(planId) {
+    const p = planOf(planId);
+    if (!p) return;
+    const c = client(p.client_id);
+    const start = addDays(p.end_date, 1);
+    const prev = planBefore(p);
+    if (!prev) return changePlanSheet(c, start);
+    const from = start > londonToday() ? start : londonToday();
+    const plan = {
+      kind: prev.kind,
+      billing: prev.billing,
+      price_pence: prev.price_pence,
+      programme_weeks: prev.programme_weeks,
+      instalments: prev.instalments,
+      method: prev.method,
+      start_date: start,
+      first_due: prev.billing === "monthly" ? nextOnDay(prev.day_of_month || Number(from.slice(8, 10)), from) : prev.billing === "none" ? null : from,
+      day_of_month: prev.billing === "monthly" ? prev.day_of_month : null,
+      hours_per_month: prev.hours_per_month,
+      sessions_per_week: prev.sessions_per_week,
+      session_minutes: prev.session_minutes,
+    };
+    if (!confirm(`Put ${firstName(c.name)} back on ${planName(prev)} · ${planPrice(prev)} from ${fmtShort(start)}?`)) return;
+    try {
+      const r = await api(`/clients/${c.id}/plan`, { method: "POST", body: { plan, then: {} } });
+      setData(r.data);
+      haptic();
+      rerender();
+      toast(`${firstName(c.name)} is back on ${KIND_SHORT[prev.kind]}`);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function finishFrom(cid, date) {
+    const c = client(cid);
+    if (!confirm(`Mark ${c.name} as finished from ${fmtShort(date)}?`)) return;
+    try {
+      const r = await api(`/clients/${cid}/finish`, { method: "POST", body: { date } });
+      setData(r.data);
+      rerender();
+      toast(`${firstName(c.name)} marked as finished`);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function dismissDecision(planId) {
+    try {
+      const r = await api(`/plans/${planId}/decided`, { method: "POST" });
+      setData(r.data);
+      rerender();
+    } catch (e) {
+      fail(e);
+    }
+  }
+
   // ---------- sheets: clients ----------
-  // Used for "Add client" and for "Edit details" from a profile. Title and button make the mode obvious.
   function clientSheet(c) {
     const isEdit = !!c;
-    const f = c || { name: "", tenure: "new", package: "coaching", programme_weeks: null, price_pence: null, method: "manual", status: "active", notes: "" };
+    const f = c || { name: "", phone: "", tenure: "new", notes: "" };
     const hasPayments = isEdit && clientPayments(c.id).length > 0;
-    const hasRepeat = isEdit && S.data.schedules.some((s) => s.client_id === c.id && s.active);
+    const today = londonToday();
+    let F = isEdit ? null : planDefaults(null, "coaching", today);
+    let kind = isEdit ? null : "coaching";
     const html = `
       <form class="form" id="cForm" novalidate>
         <div class="field"><label for="c-name">Name</label><input id="c-name" value="${esc(f.name)}" autocomplete="off" autocapitalize="words" placeholder="Client name"></div>
+        <div class="field"><label for="c-phone">Mobile <span>optional, for chasing on WhatsApp or text</span></label><input id="c-phone" type="tel" value="${esc(f.phone || "")}" autocomplete="off" placeholder="07…"></div>
         <div class="field"><span class="lab">Tenure</span>${opts("tenure", TEN, f.tenure)}</div>
-        <div class="field"><span class="lab">Package</span>${opts("package", { pt: "PT only", coaching: "Full coaching", programme: "Programme only" }, f.package)}</div>
-        <div class="field" id="c-weeks-f" ${f.package === "programme" ? "" : "hidden"}><span class="lab">Programme length</span>${opts("weeks", WEEK_OPTS, f.programme_weeks)}</div>
-        <div class="field"><label for="c-price">Agreed price</label><div class="money"><span>£</span><input id="c-price" inputmode="decimal" value="${moneyInput(f.price_pence)}" placeholder="0"></div></div>
-        <div class="field"><span class="lab">Usual payment method</span>${opts("method", METH, f.method)}</div>
         ${
           isEdit
-            ? `<div class="field"><span class="lab">Client status</span>${opts("status", CST, f.status)}<p class="hint" id="c-status-hint" ${
-                f.status === "active" ? "hidden" : ""
-              }>Paused and finished clients don't get new monthly charges. Anything they already owe stays on the books.</p></div>`
-            : `<div class="subcard">
-                <h4>Next payment <span style="font-weight:400;color:var(--muted)">optional</span></h4>
-                <div class="field"><label for="c-next">Due date</label><input id="c-next" type="date" value=""></div>
-                <label class="switch-row"><span class="l">Repeat monthly<small>Same date every month until you stop it</small></span><span class="switch"><input type="checkbox" id="c-repeat" ${
-                  f.package === "programme" ? "" : "checked"
-                }><i></i></span></label>
-                <p class="hint">Uses the package, price and method above. Leave the date blank to add payments later.</p>
-              </div>`
+            ? ""
+            : `<div class="field"><span class="lab">What are they on?</span>${opts("kind", { pt: "PT", coaching: "Full coaching", programme: "Programme", none: "Not sure yet" }, kind)}</div>
+               <div id="c-plan"></div>`
         }
         <div class="field"><label for="c-notes">Notes <span>optional</span></label><textarea id="c-notes" rows="2" placeholder="Arrangements, reminders, anything useful">${esc(f.notes)}</textarea></div>
-        ${isEdit ? `<p class="hint">Changing their package or price won't rewrite past payments.${hasRepeat ? " To change the monthly amount, tap their repeat on the profile." : ""}</p>` : ""}
+        ${isEdit ? `<p class="hint">Price, package and payment day live in their plan. Use <b>Change plan</b> on their profile.</p>` : ""}
         <div class="form-err" id="c-err"></div>
         <button class="btn lime" type="submit">${isEdit ? "Save changes" : "Add client"}</button>
         ${isEdit && !hasPayments ? `<button class="btn danger" type="button" id="c-del">Delete client</button>` : ""}
       </form>`;
     openSheet(isEdit ? "Edit client details" : "New client", html, (sh) => {
-      const pkg = $('[data-name="package"]', sh);
-      pkg.addEventListener("change", () => {
-        $("#c-weeks-f", sh).hidden = pkg.dataset.value !== "programme";
-        const rep = $("#c-repeat", sh);
-        if (rep) rep.checked = pkg.dataset.value !== "programme";
-      });
-      const stat = $('[data-name="status"]', sh);
-      if (stat) stat.addEventListener("change", () => ($("#c-status-hint", sh).hidden = stat.dataset.value === "active"));
+      if (!isEdit) {
+        const box = $("#c-plan", sh);
+        const draw = () => {
+          const fresh = document.createElement("div");
+          fresh.id = "c-plan";
+          $("#c-plan", sh).replaceWith(fresh);
+          if (kind === "none") {
+            fresh.innerHTML = `<p class="hint">You can set their plan later from their profile.</p>`;
+            return;
+          }
+          const keep = F;
+          F = planDefaults(null, kind, today);
+          if (keep) {
+            F.price = keep.price;
+            F.method = keep.method;
+            F.first_due = keep.first_due;
+          }
+          bindPlanForm(sh, F, fresh, "add");
+        };
+        void box;
+        $('[data-name="kind"]', sh).addEventListener("change", (e) => {
+          kind = e.currentTarget.dataset.value;
+          draw();
+        });
+        draw();
+      }
       const del = $("#c-del", sh);
       if (del)
         del.onclick = async () => {
@@ -1526,25 +2487,21 @@
         err.textContent = "";
         const body = {
           name: $("#c-name", sh).value.trim(),
+          phone: $("#c-phone", sh).value.trim(),
           tenure: val(sh, "tenure"),
-          package: val(sh, "package"),
-          programme_weeks: val(sh, "weeks") ? Number(val(sh, "weeks")) : null,
-          price_pence: parseMoney($("#c-price", sh).value),
-          method: val(sh, "method"),
-          status: isEdit ? val(sh, "status") : "active",
           notes: $("#c-notes", sh).value,
         };
         if (!body.name) return (err.textContent = "Add their name.");
-        if (body.price_pence == null) return (err.textContent = "Enter the agreed price in pounds, e.g. 160.");
-        if (body.package === "programme" && !body.programme_weeks) return (err.textContent = "Pick the programme length.");
         if (!isEdit) {
           const dup = S.data.clients.find((x) => x.name.trim().toLowerCase() === body.name.toLowerCase());
           if (dup && !confirm(`You already have a client called ${dup.name}. Add another one anyway?`)) return;
-          const d = $("#c-next", sh).value;
-          if (d) body.next = { due_date: d, repeat: $("#c-repeat", sh).checked };
-        }
-        if (isEdit && c.status === "active" && body.status !== "active" && hasRepeat) {
-          if (!confirm(`Set ${body.name} to ${CST[body.status]}? Their monthly repeat pauses and upcoming unpaid repeats are removed. Anything already due stays.`)) return;
+          if (kind !== "none") {
+            const problem = planProblem(F);
+            if (problem) return (err.textContent = problem);
+            const plan = planPayload(F, "add");
+            if (F.kind !== "programme") plan.start_date = plan.first_due && plan.first_due < today ? plan.first_due : today;
+            body.plan = plan;
+          }
         }
         const btn = $("button[type=submit]", sh);
         btn.disabled = true;
@@ -1554,13 +2511,12 @@
           closeSheet();
           haptic();
           if (!isEdit) {
-            // take you straight to the new client's profile
             S.tab = "clients";
             S.clientId = r.id;
             render("push");
             window.scrollTo(0, 0);
           } else rerender();
-          toast(isEdit ? "Changes saved" : body.next ? `${body.name} added with their next payment` : `${body.name} added`);
+          toast(isEdit ? "Changes saved" : `${body.name} added`);
         } catch (e2) {
           btn.disabled = false;
           if (!e2.silent) err.textContent = e2.message;
@@ -1569,29 +2525,15 @@
     });
   }
 
-  async function setClientStatus(c, to) {
-    const hasRepeat = S.data.schedules.some((s) => s.client_id === c.id && s.active);
-    if (to !== "active" && hasRepeat && !confirm(`Pause ${c.name}? Their monthly repeat stops for now and upcoming unpaid repeats are removed. Anything already due stays.`)) return;
-    try {
-      const body = { ...c, status: to };
-      const r = await api(`/clients/${c.id}`, { method: "PUT", body });
-      setData(r.data);
-      haptic();
-      rerender();
-      toast(to === "active" ? `${c.name} is active again` : `${c.name} paused`);
-    } catch (e) {
-      fail(e);
-    }
-  }
-
   function addSheet() {
     openSheet(
       "Add",
       `<div class="action-list">
         <button class="action" data-action="add-payment"${S.tab === "clients" && S.clientId ? ` data-client="${S.clientId}"` : ""}${
         S.tab === "calendar" && S.calDay ? ` data-date="${S.calDay}"` : ""
-      }><span class="ic">${ic("receipt")}</span><span><b>Add payment</b><small>One-off or repeating monthly</small></span></button>
-        <button class="action" data-action="add-client"><span class="ic">${ic("userplus")}</span><span><b>Add client</b><small>With their next payment if you like</small></span></button>
+      }><span class="ic">${ic("receipt")}</span><span><b>Add payment</b><small>A one-off or extra</small></span></button>
+        <button class="action" data-action="add-client"><span class="ic">${ic("userplus")}</span><span><b>Add client</b><small>With their plan</small></span></button>
+        ${S.tab === "clients" && S.clientId ? `<button class="action" data-change-plan="${S.clientId}"><span class="ic">${ic("swap")}</span><span><b>Change ${esc(firstName(client(S.clientId)?.name))}'s plan</b><small>Switch, break or finish</small></span></button>` : ""}
       </div>`
     );
   }
@@ -1666,6 +2608,40 @@
     );
   }
 
+  // ---------- morning nudges (web push) ----------
+  async function checkPushHere() {
+    try {
+      if (!("serviceWorker" in navigator) || !("PushManager" in window)) return (S.pushHere = false);
+      const reg = await navigator.serviceWorker.ready;
+      S.pushHere = !!(await reg.pushManager.getSubscription());
+    } catch {
+      S.pushHere = false;
+    }
+  }
+  async function enableNudges() {
+    if (isIOS() && !isStandalone()) throw new Error("Open TS Pay from your Home Screen first, then turn this on.");
+    const perm = await Notification.requestPermission();
+    if (perm !== "granted") throw new Error("Notifications are blocked. Turn them on in iPhone Settings → Notifications → TS Pay.");
+    const reg = await navigator.serviceWorker.ready;
+    const { key } = await api("/push/key");
+    let sub = await reg.pushManager.getSubscription();
+    if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64.dec(key) });
+    const r = await api("/push/subscribe", { method: "POST", body: sub.toJSON() });
+    S.data.settings = r.settings;
+    S.pushHere = true;
+    updateBadge();
+  }
+  async function disableNudges() {
+    const reg = await navigator.serviceWorker.ready;
+    const sub = await reg.pushManager.getSubscription();
+    if (sub) {
+      const r = await api("/push/unsubscribe", { method: "POST", body: { endpoint: sub.endpoint } });
+      S.data.settings = r.settings;
+      await sub.unsubscribe().catch(() => {});
+    }
+    S.pushHere = false;
+  }
+
   // ---------- navigation ----------
   function goTab(t) {
     const tabBtn = $(`.tab[data-tab="${t}"]`);
@@ -1681,6 +2657,14 @@
         return;
       }
       window.scrollTo({ top: 0, behavior: "smooth" });
+      return;
+    }
+    if (t === "more") {
+      S.prevTab = S.tab;
+      S.tab = "more";
+      checkPushHere().then(() => S.tab === "more" && rerender());
+      render("push");
+      window.scrollTo(0, 0);
       return;
     }
     S.tab = t;
@@ -1712,136 +2696,178 @@
     render();
   }
 
-  document.addEventListener("click", (e) => {
-    if (S.suppressClick) {
-      e.preventDefault();
-      e.stopPropagation();
-      return;
-    }
-    const t = e.target.closest(
-      "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-sched-edit],[data-theme-set]"
-    );
-    if (!t || t.disabled) return;
-    const d = t.dataset;
-    if (d.pay) {
-      e.stopPropagation();
-      haptic();
-      const r = t.getBoundingClientRect();
-      burst(r.left + r.width / 2, r.top + r.height / 2);
-      return quickPay(Number(d.pay));
-    }
-    if (d.tab) return goTab(d.tab);
-    if (d.schedEdit) {
-      const s = S.smap.get(Number(d.schedEdit));
-      if (s) scheduleSheet(s);
-      return;
-    }
-    if (d.themeSet) {
-      setTheme(d.themeSet);
-      return rerender();
-    }
-    if (d.action) {
-      switch (d.action) {
-        case "add":
-          return addSheet();
-        case "add-payment":
-          return paymentSheet(null, { due_date: d.date, client_id: d.client ? Number(d.client) : null });
-        case "add-client":
-          return clientSheet(null);
-        case "edit-client": {
-          const c = client(Number(d.client));
-          return c && clientSheet(c);
-        }
-        case "client-status": {
-          const c = client(Number(d.client));
-          return c && setClientStatus(c, d.to);
-        }
-        case "back":
-          S.clientId = null;
-          render("pop");
-          return;
-        case "faceid-setup":
-          return setupFaceId();
-        case "faceid-remove":
-          return removeFaceId();
-        case "hide-face":
-          setPref("hideFace", "1");
-          return rerender();
-        case "edit-name":
-          return nameSheet();
-        case "password":
-          return passwordSheet();
-        case "signout":
-          if (!confirm("Sign out of this device?")) return;
-          return api("/logout", { method: "POST", raw: true })
-            .catch(() => {})
-            .then(() => {
-              S.data = null;
-              renderLogin();
-            });
+  document.addEventListener(
+    "click",
+    (e) => {
+      if (S.suppressClick) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
       }
-      return;
-    }
-    if (d.month !== undefined) {
-      if (!d.month) return;
-      const dir = d.month > S.month ? 1 : -1;
-      if (d.month === S.month) return;
-      S.month = d.month;
-      S.heroAnim = dir > 0 ? "from-right" : "from-left";
-      return rerender();
-    }
-    if (d.scope) {
-      S.scope = d.scope;
-      if (d.status) S.fStatus = d.status;
-      rerender();
-      if (t.classList.contains("tile") || t.classList.contains("banner")) {
-        const el = $(".section-head");
-        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      const t = e.target.closest(
+        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix]"
+      );
+      if (!t || t.disabled) return;
+      const d = t.dataset;
+      if (d.pay) {
+        e.stopPropagation();
+        haptic();
+        const r = t.getBoundingClientRect();
+        burst(r.left + r.width / 2, r.top + r.height / 2);
+        const card = t.closest(".chase-card");
+        if (card) {
+          card.classList.add("gone");
+          setTimeout(() => card.remove(), 300);
+        }
+        return quickPay(Number(d.pay));
       }
-      return;
-    }
-    if (d.openPay) {
-      const p = S.data.payments.find((x) => x.id === Number(d.openPay));
-      if (p) paymentSheet(p);
-      return;
-    }
-    if (d.openClient) {
-      S.clientId = Number(d.openClient);
-      render("push");
-      window.scrollTo(0, 0);
-      return;
-    }
-    if (d.day) {
-      S.calDay = d.day;
-      return rerender();
-    }
-    if (d.cal) {
-      if (d.cal === "today") {
-        const tk = mKey(londonToday());
-        const dir = tk > S.calMonth ? 1 : -1;
-        setCalMonth(tk);
-        S.calAnim = dir > 0 ? "from-right" : "from-left";
+      if (d.tab) return goTab(d.tab);
+      if (d.themeSet) {
+        setTheme(d.themeSet);
         return rerender();
       }
-      return shiftCal(d.cal === "prev" ? -1 : 1);
-    }
-    if (d.calmode) {
-      S.calMode = d.calmode;
-      return rerender();
-    }
-    if (d.listmode) {
-      S.listMode = d.listmode;
-      setPref("listMode", d.listmode);
-      return rerender();
-    }
-    if (d.cstatus) {
-      S.cStatus = d.cstatus;
-      return rerender();
-    }
-  }, true);
+      if (d.changePlan) {
+        const c = client(Number(d.changePlan));
+        return c && changePlanSheet(c, d.from);
+      }
+      if (d.editPlan) {
+        const p = planOf(Number(d.editPlan));
+        return p && editPlanSheet(p);
+      }
+      if (d.resume) return resumeFrom(Number(d.resume));
+      if (d.finish) return finishFrom(Number(d.finish), d.date);
+      if (d.dismiss) return dismissDecision(Number(d.dismiss));
+      if (d.chase) {
+        const p = S.data.payments.find((x) => x.id === Number(d.chase));
+        return p && chaseSheet([p]);
+      }
+      if (d.chaseClient) return chaseSheet(clientOwes(Number(d.chaseClient)));
+      if (d.trend) {
+        S.trendSel = d.trend;
+        return rerender();
+      }
+      if (d.mix) {
+        S.mixMode = d.mix;
+        return rerender();
+      }
+      if (d.action) {
+        switch (d.action) {
+          case "add":
+            return addSheet();
+          case "add-payment":
+            return paymentSheet(null, { due_date: d.date, client_id: d.client ? Number(d.client) : null });
+          case "add-client":
+            return clientSheet(null);
+          case "edit-client": {
+            const c = client(Number(d.client));
+            return c && clientSheet(c);
+          }
+          case "chase-list":
+            return chaseSheet();
+          case "template":
+            return templateSheet();
+          case "goal":
+            return goalSheet();
+          case "trend-table":
+            S.trendTable = !S.trendTable;
+            return rerender();
+          case "back":
+            S.clientId = null;
+            render("pop");
+            return;
+          case "close-settings":
+            S.tab = S.prevTab && S.prevTab !== "more" ? S.prevTab : "month";
+            render("pop");
+            return;
+          case "push-test":
+            return api("/push/test", { method: "POST" })
+              .then((r) => toast(r.ok ? "Sent. It should arrive in a few seconds." : "Couldn't reach your phone. Try turning nudges off and on again."))
+              .catch(fail);
+          case "faceid-setup":
+            return setupFaceId();
+          case "faceid-remove":
+            return removeFaceId();
+          case "hide-face":
+            setPref("hideFace", "1");
+            return rerender();
+          case "edit-name":
+            return nameSheet();
+          case "password":
+            return passwordSheet();
+          case "signout":
+            if (!confirm("Sign out of this device?")) return;
+            return api("/logout", { method: "POST", raw: true })
+              .catch(() => {})
+              .then(() => {
+                S.data = null;
+                renderLogin();
+              });
+        }
+        return;
+      }
+      if (d.month !== undefined) {
+        if (!d.month || d.month === S.month) return;
+        const dir = d.month > S.month ? 1 : -1;
+        S.month = d.month;
+        S.heroAnim = dir > 0 ? "from-right" : "from-left";
+        return rerender();
+      }
+      if (d.scope) {
+        S.scope = d.scope;
+        if (d.status) S.fStatus = d.status;
+        rerender();
+        if (t.classList.contains("tile") || t.classList.contains("banner")) {
+          const el = $(".section-head");
+          if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+        }
+        return;
+      }
+      if (d.openPay) {
+        const p = S.data.payments.find((x) => x.id === Number(d.openPay));
+        if (p) paymentSheet(p);
+        return;
+      }
+      if (d.openClient) {
+        if (t.hasAttribute("data-close-sheet")) closeSheet(true);
+        S.tab = "clients";
+        S.clientId = Number(d.openClient);
+        render("push");
+        window.scrollTo(0, 0);
+        return;
+      }
+      if (d.day) {
+        S.calDay = d.day;
+        return rerender();
+      }
+      if (d.cal) {
+        if (d.cal === "today") {
+          const tk = mKey(londonToday());
+          const dir = tk > S.calMonth ? 1 : -1;
+          setCalMonth(tk);
+          S.calAnim = dir > 0 ? "from-right" : "from-left";
+          return rerender();
+        }
+        return shiftCal(d.cal === "prev" ? -1 : 1);
+      }
+      if (d.calmode) {
+        S.calMode = d.calmode;
+        return rerender();
+      }
+      if (d.listmode) {
+        S.listMode = d.listmode;
+        setPref("listMode", d.listmode);
+        return rerender();
+      }
+      if (d.cstatus) {
+        S.cStatus = d.cstatus;
+        return rerender();
+      }
+    },
+    true
+  );
 
   document.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target.matches(".prow[data-open-pay]")) {
+    if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-open-pay][role=button]")) {
       e.preventDefault();
       e.target.click();
     }
@@ -1875,9 +2901,30 @@
         fail(err);
       }
     }
+    if (e.target.id === "nudgeToggle") {
+      const on = e.target.checked;
+      try {
+        if (on) await enableNudges();
+        else await disableNudges();
+        toast(on ? `Morning nudge on for ${S.data.settings.nudgeHour}:00am` : "Morning nudge off");
+      } catch (err) {
+        e.target.checked = !on;
+        fail(err);
+      }
+      rerender();
+    }
+    if (e.target.id === "nudgeHour") {
+      try {
+        const r = await api("/settings", { method: "POST", body: { nudgeHour: Number(e.target.value) } });
+        S.data.settings = r.settings;
+        toast(`Nudge time set to ${e.target.value}:00am`);
+      } catch (err) {
+        fail(err);
+      }
+    }
   });
 
-  // ---------- touch: swipe-to-pay, month swipes, pull to refresh, edge-swipe back ----------
+  // ---------- touch: swipe rows, month swipes, pull to refresh, edge-swipe back ----------
   let T = null;
   document.addEventListener(
     "touchstart",
@@ -1885,18 +2932,20 @@
       if (sheet || !S.data || S.locked || e.touches.length > 1) return;
       const t = e.touches[0];
       const tgt = e.target;
+      const sw = tgt.closest(".swipe");
       T = {
         x0: t.clientX,
         y0: t.clientY,
         dx: 0,
         dy: 0,
         mode: null,
-        row: tgt.closest(".swipe > .prow") && tgt.closest(".swipe").querySelector(".swipe-bg") ? tgt.closest(".swipe > .prow") : null,
+        row: sw && $(".swipe-bg", sw) ? $(".prow", sw) : null,
         pan: tgt.closest("#hero, #calCard"),
-        edge: t.clientX < 28 && S.tab === "clients" && S.clientId,
+        edge: t.clientX < 28 && ((S.tab === "clients" && S.clientId) || S.tab === "more"),
         top: window.scrollY <= 0,
-        noPull: !!tgt.closest(".strip, .table-wrap, .tabbar"),
+        noPull: !!tgt.closest(".strip, .table-wrap, .tabbar, .trend"),
       };
+      if (T.pan && T.pan.id === "hero" && S.tab !== "month") T.pan = null;
     },
     { passive: true }
   );
@@ -1918,17 +2967,22 @@
       if (T.mode === "none") return;
       e.preventDefault();
       if (T.mode === "row") {
-        const d = Math.min(0, T.dx);
-        const eased = d < -110 ? -110 + (d + 110) * 0.35 : d;
-        const bg = T.row.previousElementSibling;
+        const d = T.dx;
+        const lim = 110;
+        const eased = Math.abs(d) > lim ? Math.sign(d) * (lim + (Math.abs(d) - lim) * 0.35) : d;
+        const wrap = T.row.parentElement;
+        const bgPaid = $(".swipe-bg.paid", wrap);
+        const bgChase = $(".swipe-bg.chase", wrap);
         T.row.classList.add("dragging");
         T.row.classList.remove("snap");
         T.row.style.transform = `translateX(${eased}px)`;
-        bg.style.opacity = Math.min(1, -d / 50);
-        const armed = d < -90;
+        bgPaid.style.opacity = d < 0 ? Math.min(1, -d / 50) : 0;
+        bgChase.style.opacity = d > 0 ? Math.min(1, d / 50) : 0;
+        const armed = d < -90 ? "paid" : d > 90 ? "chase" : null;
         if (armed !== T.armed) {
           T.armed = armed;
-          bg.classList.toggle("armed", armed);
+          bgPaid.classList.toggle("armed", armed === "paid");
+          bgChase.classList.toggle("armed", armed === "chase");
           if (armed) haptic();
         }
       } else if (T.mode === "pan") {
@@ -1963,17 +3017,22 @@
     S.suppressClick = true;
     setTimeout(() => (S.suppressClick = false), 350);
     if (s.mode === "row") {
+      const wrap = s.row.parentElement;
       s.row.classList.remove("dragging");
       s.row.classList.add("snap");
-      const bg = s.row.previousElementSibling;
-      if (s.armed) {
+      const id = Number(s.row.dataset.openPay);
+      if (s.armed === "paid") {
         s.row.style.transform = "translateX(-110%)";
-        const r = bg.getBoundingClientRect();
+        const r = $(".swipe-bg.paid", wrap).getBoundingClientRect();
         burst(r.right - 40, r.top + r.height / 2);
-        setTimeout(() => quickPay(Number(s.row.dataset.openPay)), 200);
+        setTimeout(() => quickPay(id), 200);
       } else {
         s.row.style.transform = "";
-        bg.style.opacity = 0;
+        $$(".swipe-bg", wrap).forEach((b) => (b.style.opacity = 0));
+        if (s.armed === "chase") {
+          const p = S.data.payments.find((x) => x.id === id);
+          if (p) setTimeout(() => chaseSheet([p]), 150);
+        }
       }
     } else if (s.mode === "pan") {
       const target = s.pan.id === "calCard" ? $("#calGrid") : s.pan;
@@ -1991,7 +3050,9 @@
       v.style.transform = "";
       setTimeout(() => (v.style.transition = ""), 260);
       if (s.dx > 90) {
-        S.clientId = null;
+        if (S.tab === "more") {
+          S.tab = S.prevTab && S.prevTab !== "more" ? S.prevTab : "month";
+        } else S.clientId = null;
         render("pop");
       }
     } else if (s.mode === "ptr") {
@@ -2064,6 +3125,7 @@
       if (!S.calMonth) setCalMonth(S.month);
       root().innerHTML = "";
       render("fade");
+      checkPushHere();
     } catch (e) {
       if (e.silent) return;
       root().innerHTML = `<div class="lock-screen"><div class="coin-logo big">£</div><h1>Can't connect</h1><p>${esc(e.message)}</p><button class="btn lime" id="retry">Try again</button></div>`;

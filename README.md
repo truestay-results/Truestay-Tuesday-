@@ -14,8 +14,10 @@ Pushing to `main` deploys automatically via Cloudflare Workers Builds.
 
 Private client payment and revenue tracker. Phone-first web app: add it to your home screen from Safari.
 
-- Front end: `public/pay/` (plain HTML/CSS/JS, installable as an app)
-- API: `src/pay.js`, mounted at `/api/pay/*`
-- Data: Cloudflare D1 database `truestay-pay` (binding `PAY_DB`), schema in `migrations/0001_pay.sql`
+- Front end: `public/pay/` (plain HTML/CSS/JS, installable as an app; `sw.js` handles offline start + morning nudges)
+- API: `src/pay.js` (routes, login, Face ID, settings, exports, nudges), `src/pay-plans.js` (plans), `src/pay-push.js` (Web Push), `src/pay-util.js`
+- Data: Cloudflare D1 database `truestay-pay` (binding `PAY_DB`), schema in `migrations/`
+- Plans: each client has a timeline of plans (PT / coaching / programme / break, paid monthly, upfront, split or as they go). Plans create their own payments; switching or ending a plan only removes its unpaid, not-yet-due payments
+- Morning nudge: hourly cron (`triggers.crons` in `wrangler.jsonc`) sends one Web Push a day at the chosen UK hour; VAPID keys live in `pay_meta`
 - Sign-in: email and password once per device (sessions last a year), optional Face ID via passkeys
-- Money stored in pence; tracking starts 28 September 2026; monthly repeats are created up to the end of next month
+- Money stored in pence; tracking starts 28 September 2026

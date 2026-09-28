@@ -1,6 +1,12 @@
 // TrueStay Pay — private client payment & revenue tracker at /pay
 // API lives under /api/pay/*. Data in D1 (binding PAY_DB).
 //
+// Files
+//   pay.js        routes, login/Face ID, settings, exports, morning nudges
+//   pay-plans.js  plans (what each client is on over time) and the payments they create
+//   pay-push.js   Web Push (VAPID + encryption) for the morning nudge
+//   pay-util.js   dates, validation, labels
+//
 // Auth model
 //  - One owner account (email + password), created once with a one-time setup code
 //    whose SHA-256 is stored in pay_meta.setup_code_hash.
@@ -11,38 +17,25 @@
 //    backs that up by locking a session that has gone quiet (the open app pings
 //    /session every 30s, so it never locks mid-use).
 
-const TRACK_START = "2026-09-28";
-const PACKAGES = ["pt", "coaching", "programme"];
-const TENURES = ["new", "newish", "longstanding"];
-const METHODS = ["manual", "dd"];
-const CLIENT_STATUSES = ["active", "paused", "finished"];
-const WEEKS = [4, 8, 12, 16];
+import {
+  TRACK_START, PACKAGES, TENURES, METHODS, WEEKS, PKG_LABEL, TEN_LABEL, METHOD_LABEL, STATUS_LABEL, BILLING_LABEL,
+  HttpError, bad, nowS, londonToday, londonHour, londonWeekday, isDate, addDays, ukDate, pence, oneOf, text, idFrom, money,
+} from "./pay-util.js";
+import {
+  ensureSchema, generate, cleanPlan, addFirstPlan, switchPlan, finishClient, editPlan, deletePlan, clientStatus, currentPlan, planLabel,
+} from "./pay-plans.js";
+import { vapidKeys, pushAll } from "./pay-push.js";
+
 const LOCK_OPTIONS = [0, 1, 5, 15, 60, 240];
-// Server-side idle window. "Every open" (1) gets a 2 minute window; the app's own
-// lock screen handles re-opening.
+// Server-side idle window. "Every open" (1) gets a 2 minute window; the app's own lock screen handles re-opening.
 const idleSecs = (m) => (m <= 1 ? 120 : m * 60);
 const SESSION_DAYS = 365;
 const COOKIE = "tsp_session";
 const PBKDF2_ITER = 100000;
-
-const PKG_LABEL = { pt: "Personal training only", coaching: "Full coaching", programme: "Programme only" };
-const TEN_LABEL = { new: "New", newish: "New-ish", longstanding: "Longstanding" };
-const METHOD_LABEL = { manual: "Manual payment", dd: "Direct debit" };
-const STATUS_LABEL = { active: "Active", paused: "Paused", finished: "Finished" };
+const PUSH_HOSTS = ["web.push.apple.com", "fcm.googleapis.com", "updates.push.services.mozilla.com", "notify.windows.com", "push.services.mozilla.com"];
 
 const enc = new TextEncoder();
 const dec = new TextDecoder();
-
-class HttpError extends Error {
-  constructor(status, message, extra = {}) {
-    super(message);
-    this.status = status;
-    this.extra = extra;
-  }
-}
-const bad = (msg) => {
-  throw new HttpError(400, msg);
-};
 
 const json = (data, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), {
@@ -51,7 +44,6 @@ const json = (data, status = 200, headers = {}) =>
   });
 
 // ---------- small helpers ----------
-const nowS = () => Math.floor(Date.now() / 1000);
 const randomBytes = (n) => crypto.getRandomValues(new Uint8Array(n));
 const b64u = {
   enc(buf) {
@@ -80,38 +72,8 @@ function safeEqual(a, b) {
   if (A.length !== B.length) return false;
   return crypto.subtle.timingSafeEqual(A, B);
 }
-
-// ---------- dates (UK) ----------
-const londonToday = () =>
-  new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Europe/London",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(new Date());
-const isDate = (s) => {
-  if (typeof s !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-  const d = new Date(s + "T00:00:00Z");
-  return !isNaN(d) && d.toISOString().slice(0, 10) === s;
-};
-const addDays = (s, n) => {
-  const d = new Date(s + "T00:00:00Z");
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-};
-const daysInMonth = (y, m) => new Date(Date.UTC(y, m, 0)).getUTCDate();
-const occurrence = (y, m, day) =>
-  `${y}-${String(m).padStart(2, "0")}-${String(Math.min(day, daysInMonth(y, m))).padStart(2, "0")}`;
-const endOfNextMonth = (today) => {
-  let [y, m] = today.split("-").map(Number);
-  m += 1;
-  if (m > 12) {
-    m = 1;
-    y += 1;
-  }
-  return occurrence(y, m, 31);
-};
-const ukDate = (iso) => (iso ? `${iso.slice(8, 10)}/${iso.slice(5, 7)}/${iso.slice(0, 4)}` : "");
+const sumP = (ps) => ps.reduce((a, p) => a + p.amount_pence, 0);
+const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
 // ---------- passwords ----------
 async function hashPassword(password, saltB64, iter = PBKDF2_ITER) {
@@ -284,205 +246,6 @@ async function verifySignature(cred, authData, cdBytes, sig) {
   }
 }
 
-// ---------- validation ----------
-function pence(v, label = "amount") {
-  const n = Number(v);
-  if (!Number.isInteger(n) || n < 0 || n > 10_000_000) bad(`Enter a valid ${label}`);
-  return n;
-}
-const oneOf = (v, list, msg) => (list.includes(v) ? v : bad(msg));
-const text = (v, max) => String(v ?? "").trim().slice(0, max);
-function weeksFor(pkg, v) {
-  if (pkg !== "programme") return null;
-  const n = Number(v);
-  return WEEKS.includes(n) ? n : bad("Pick a programme length");
-}
-function cleanClient(b) {
-  const name = text(b.name, 80);
-  if (!name) bad("Name is required");
-  const pkg = oneOf(b.package, PACKAGES, "Pick a package");
-  return {
-    name,
-    tenure: oneOf(b.tenure, TENURES, "Pick a tenure"),
-    package: pkg,
-    programme_weeks: weeksFor(pkg, b.programme_weeks),
-    price_pence: pence(b.price_pence, "price"),
-    method: oneOf(b.method, METHODS, "Pick a payment method"),
-    status: oneOf(b.status || "active", CLIENT_STATUSES, "Pick a status"),
-    notes: text(b.notes, 2000),
-  };
-}
-function cleanPayment(b) {
-  const pkg = oneOf(b.package, PACKAGES, "Pick a package");
-  if (!isDate(b.due_date)) bad("Pick a due date");
-  if (b.paid_date != null && b.paid_date !== "" && !isDate(b.paid_date)) bad("Paid date isn't valid");
-  return {
-    client_id: Number(b.client_id),
-    package: pkg,
-    programme_weeks: weeksFor(pkg, b.programme_weeks),
-    amount_pence: pence(b.amount_pence),
-    due_date: b.due_date,
-    method: oneOf(b.method, METHODS, "Pick a payment method"),
-    paid_date: b.paid_date || null,
-    notes: text(b.notes, 2000),
-  };
-}
-const idFrom = (s) => {
-  const n = Number(s);
-  if (!Number.isInteger(n) || n <= 0) bad("Bad id");
-  return n;
-};
-
-// ---------- recurring generation ----------
-// Creates the monthly payments for active repeat rules, up to the end of next month.
-// Never creates anything before the tracking start date or before the rule started.
-// The unique index on (schedule_id, due_date) makes this safe to run repeatedly.
-async function generateRecurring(env) {
-  const db = env.PAY_DB;
-  const horizon = endOfNextMonth(londonToday());
-  const { results } = await db
-    .prepare(
-      `SELECT s.* FROM pay_schedules s JOIN pay_clients c ON c.id = s.client_id
-       WHERE s.active = 1 AND c.status = 'active' AND (s.generated_through IS NULL OR s.generated_through < ?)`
-    )
-    .bind(horizon)
-    .all();
-  if (!results.length) return;
-  const now = nowS();
-  const stmts = [];
-  for (const s of results) {
-    const from = s.generated_through ? addDays(s.generated_through, 1) : s.start_date;
-    let [y, m] = from.split("-").map(Number);
-    for (let k = 0; k < 36; k++) {
-      const d = occurrence(y, m, s.day_of_month);
-      if (d > horizon) break;
-      if (d >= from && d >= s.start_date && d >= TRACK_START) {
-        stmts.push(
-          db
-            .prepare(
-              `INSERT OR IGNORE INTO pay_payments
-               (client_id, schedule_id, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,NULL,'',?,?)`
-            )
-            .bind(s.client_id, s.id, s.package, s.programme_weeks, s.amount_pence, d, s.method, now, now)
-        );
-      }
-      m += 1;
-      if (m > 12) {
-        m = 1;
-        y += 1;
-      }
-    }
-    stmts.push(db.prepare("UPDATE pay_schedules SET generated_through = ? WHERE id = ?").bind(horizon, s.id));
-  }
-  await db.batch(stmts);
-}
-
-// Removes future, unpaid, auto-generated payments (used when stopping a repeat or pausing a client).
-// Anything already due (today or earlier) stays on the books.
-function dropFutureGenerated(db, where, bindVal, today) {
-  return db
-    .prepare(`DELETE FROM pay_payments WHERE ${where} = ? AND schedule_id IS NOT NULL AND paid_date IS NULL AND due_date > ?`)
-    .bind(bindVal, today);
-}
-
-async function getData(env) {
-  await generateRecurring(env);
-  const db = env.PAY_DB;
-  const [c, p, s] = await db.batch([
-    db.prepare("SELECT * FROM pay_clients ORDER BY name COLLATE NOCASE"),
-    db.prepare("SELECT * FROM pay_payments ORDER BY due_date, id"),
-    db.prepare("SELECT * FROM pay_schedules"),
-  ]);
-  return { today: londonToday(), trackStart: TRACK_START, clients: c.results, payments: p.results, schedules: s.results };
-}
-
-async function requireClient(db, id) {
-  const c = await db.prepare("SELECT * FROM pay_clients WHERE id = ?").bind(id).first();
-  if (!c) bad("Client not found");
-  return c;
-}
-
-// Insert one payment; if repeat is on, create the monthly rule it belongs to.
-async function insertPayment(db, p, repeat) {
-  const now = nowS();
-  let scheduleId = null;
-  if (repeat) {
-    const r = await db
-      .prepare(
-        `INSERT INTO pay_schedules (client_id, package, programme_weeks, amount_pence, method, day_of_month, start_date, generated_through, active, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,1,?,?)`
-      )
-      .bind(p.client_id, p.package, p.programme_weeks, p.amount_pence, p.method, Number(p.due_date.slice(8, 10)), p.due_date, p.due_date, now, now)
-      .run();
-    scheduleId = r.meta.last_row_id;
-  }
-  await db
-    .prepare(
-      `INSERT INTO pay_payments (client_id, schedule_id, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, created_at, updated_at)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`
-    )
-    .bind(p.client_id, scheduleId, p.package, p.programme_weeks, p.amount_pence, p.due_date, p.method, p.paid_date, p.notes, now, now)
-    .run();
-}
-
-// ---------- CSV ----------
-function csvCell(v) {
-  let s = v == null ? "" : String(v);
-  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
-  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
-}
-const csv = (rows) => "﻿" + rows.map((r) => r.map(csvCell).join(",")).join("\r\n") + "\r\n";
-const pounds = (p) => (p / 100).toFixed(2);
-
-async function exportCsv(env, type) {
-  const data = await getData(env);
-  const today = data.today;
-  const byId = Object.fromEntries(data.clients.map((c) => [c.id, c]));
-  let body;
-  let name;
-  if (type === "clients") {
-    body = csv([
-      ["Name", "Tenure", "Package", "Programme length (weeks)", "Agreed price (£)", "Usual payment method", "Client status", "Notes"],
-      ...data.clients.map((c) => [
-        c.name,
-        TEN_LABEL[c.tenure],
-        PKG_LABEL[c.package],
-        c.programme_weeks || "",
-        pounds(c.price_pence),
-        METHOD_LABEL[c.method],
-        STATUS_LABEL[c.status],
-        c.notes,
-      ]),
-    ]);
-    name = `truestay-clients-${today}.csv`;
-  } else {
-    const sched = new Set(data.schedules.filter((s) => s.active).map((s) => s.id));
-    body = csv([
-      ["Client", "Package", "Programme length (weeks)", "Amount (£)", "Due date", "Payment method", "Status", "Paid date", "Repeats monthly", "Notes"],
-      ...data.payments.map((p) => [
-        byId[p.client_id]?.name || "(deleted client)",
-        PKG_LABEL[p.package],
-        p.programme_weeks || "",
-        pounds(p.amount_pence),
-        ukDate(p.due_date),
-        METHOD_LABEL[p.method],
-        p.paid_date ? "Paid" : p.due_date < today ? "Overdue" : "Unpaid",
-        ukDate(p.paid_date),
-        p.schedule_id && sched.has(p.schedule_id) ? "Yes" : "No",
-        p.notes,
-      ]),
-    ]);
-    name = `truestay-payments-${today}.csv`;
-  }
-  return new Response(body, {
-    headers: {
-      "content-type": "text/csv; charset=utf-8",
-      "content-disposition": `attachment; filename="${name}"`,
-      "cache-control": "no-store",
-    },
-  });
-}
 
 // ---------- request handling ----------
 async function readBody(req) {
@@ -517,6 +280,186 @@ function sessionInfo(s, hasUser) {
 async function signedInResponse(env, req, user, extra = {}) {
   const token = await createSession(env, req, user);
   return json({ ok: true, ...extra }, 200, { "set-cookie": sessionCookie(token, SESSION_DAYS * 86400) });
+}
+
+
+// ---------- settings (goals, chase message, morning nudges) ----------
+const DEFAULT_CHASE =
+  "Hi {first}, hope you're well! Just a quick one: your {amount} for {package} was due on {date} and I don't think it's come through yet. Could you sort it when you get a sec? Thanks, {me}";
+const SETTINGS_DEFAULTS = { goalMonthly: 0, goalClients: 0, chaseTemplate: DEFAULT_CHASE, nudgeOn: false, nudgeHour: 8 };
+async function getSettings(db) {
+  const row = await db.prepare("SELECT value FROM pay_meta WHERE key = 'settings'").first();
+  let s = {};
+  try {
+    s = row ? JSON.parse(row.value) : {};
+  } catch {}
+  return { ...SETTINGS_DEFAULTS, ...s };
+}
+async function saveSettings(db, patch) {
+  const next = { ...(await getSettings(db)), ...patch };
+  await db
+    .prepare("INSERT INTO pay_meta (key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .bind(JSON.stringify(next))
+    .run();
+  return next;
+}
+
+// ---------- data ----------
+async function getData(env) {
+  const db = env.PAY_DB;
+  await ensureSchema(db);
+  await generate(db);
+  const [c, p, pl, subs] = await db.batch([
+    db.prepare("SELECT id, name, phone, tenure, package, programme_weeks, price_pence, method, notes, finished_on, created_at FROM pay_clients ORDER BY name COLLATE NOCASE"),
+    db.prepare(
+      "SELECT id, client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, chased_at, chase_count FROM pay_payments ORDER BY due_date, id"
+    ),
+    db.prepare("SELECT * FROM pay_plans ORDER BY client_id, start_date, id"),
+    db.prepare("SELECT COUNT(*) AS n FROM pay_push_subs"),
+  ]);
+  return {
+    today: londonToday(),
+    trackStart: TRACK_START,
+    clients: c.results,
+    payments: p.results,
+    plans: pl.results,
+    settings: await getSettings(db),
+    pushDevices: subs.results[0].n,
+  };
+}
+
+function cleanClientDetails(b) {
+  const name = text(b.name, 80);
+  if (!name) bad("Name is required");
+  return {
+    name,
+    phone: text(b.phone, 30).replace(/[^\d+ ()-]/g, ""),
+    tenure: oneOf(b.tenure, TENURES, "Pick a tenure"),
+    notes: text(b.notes, 2000),
+  };
+}
+function weeksFor(pkg, v) {
+  if (pkg !== "programme") return null;
+  const n = Number(v);
+  return WEEKS.includes(n) ? n : null;
+}
+function cleanPayment(b) {
+  const pkg = oneOf(b.package, PACKAGES, "Pick a package");
+  if (!isDate(b.due_date)) bad("Pick a due date");
+  if (b.paid_date != null && b.paid_date !== "" && !isDate(b.paid_date)) bad("Paid date isn't valid");
+  return {
+    client_id: Number(b.client_id),
+    package: pkg,
+    programme_weeks: weeksFor(pkg, b.programme_weeks),
+    amount_pence: pence(b.amount_pence),
+    due_date: b.due_date,
+    method: oneOf(b.method, METHODS, "Pick a payment method"),
+    paid_date: b.paid_date || null,
+    notes: text(b.notes, 2000),
+  };
+}
+async function requireClient(db, id) {
+  const c = await db.prepare("SELECT * FROM pay_clients WHERE id = ?").bind(id).first();
+  if (!c) bad("Client not found");
+  return c;
+}
+
+// ---------- CSV ----------
+function csvCell(v) {
+  let s = v == null ? "" : String(v);
+  if (/^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+const csv = (rows) => "﻿" + rows.map((r) => r.map(csvCell).join(",")).join("\r\n") + "\r\n";
+const pounds = (p) => (p / 100).toFixed(2);
+const billingText = (p) => (p.billing === "split" ? `Split into ${p.instalments}` : BILLING_LABEL[p.billing]);
+
+async function exportCsv(env, type) {
+  const data = await getData(env);
+  const today = data.today;
+  const byId = Object.fromEntries(data.clients.map((c) => [c.id, c]));
+  const plansOf = (id) => data.plans.filter((p) => p.client_id === id);
+  let rows;
+  let name;
+  if (type === "clients") {
+    rows = [
+      ["Name", "Phone", "Tenure", "Current plan", "How they pay", "Price (£)", "Usual payment method", "Client status", "Notes"],
+      ...data.clients.map((c) => {
+        const ps = plansOf(c.id);
+        const cur = currentPlan(ps, today) || ps[ps.length - 1];
+        return [
+          c.name, c.phone, TEN_LABEL[c.tenure], cur ? planLabel(cur) : "", cur ? billingText(cur) : "", cur && cur.kind !== "break" ? pounds(cur.price_pence) : "",
+          cur ? METHOD_LABEL[cur.method] : "", STATUS_LABEL[clientStatus(c, ps, today)], c.notes,
+        ];
+      }),
+    ];
+    name = `truestay-clients-${today}.csv`;
+  } else if (type === "plans") {
+    rows = [
+      ["Client", "Plan", "How they pay", "Price (£)", "Start date", "End date", "Payment method", "Hours per month", "Notes"],
+      ...data.plans.map((p) => [
+        byId[p.client_id]?.name || "(deleted client)", planLabel(p), p.kind === "break" ? "" : billingText(p), p.kind === "break" ? "" : pounds(p.price_pence),
+        ukDate(p.start_date), p.end_date ? ukDate(p.end_date) : "Ongoing", p.kind === "break" ? "" : METHOD_LABEL[p.method], p.hours_per_month ?? "", p.notes,
+      ]),
+    ];
+    name = `truestay-plans-${today}.csv`;
+  } else {
+    rows = [
+      ["Client", "Package", "Programme length (weeks)", "Amount (£)", "Due date", "Payment method", "Status", "Paid date", "From plan", "Times chased", "Notes"],
+      ...data.payments.map((p) => [
+        byId[p.client_id]?.name || "(deleted client)", PKG_LABEL[p.package], p.programme_weeks || "", pounds(p.amount_pence), ukDate(p.due_date),
+        METHOD_LABEL[p.method], p.paid_date ? "Paid" : p.due_date < today ? "Overdue" : "Unpaid", ukDate(p.paid_date), p.auto ? "Yes" : "No",
+        p.chase_count || 0, p.notes,
+      ]),
+    ];
+    name = `truestay-payments-${today}.csv`;
+  }
+  return new Response(csv(rows), {
+    headers: { "content-type": "text/csv; charset=utf-8", "content-disposition": `attachment; filename="${name}"`, "cache-control": "no-store" },
+  });
+}
+
+// ---------- morning nudge ----------
+export function composeNudge(data, weekday) {
+  const today = data.today;
+  const yesterday = addDays(today, -1);
+  const first = (id) => (data.clients.find((c) => c.id === id)?.name || "Client").split(/\s+/)[0];
+  const unpaid = data.payments.filter((p) => !p.paid_date);
+  const dueToday = unpaid.filter((p) => p.due_date === today);
+  const missed = unpaid.filter((p) => p.due_date === yesterday);
+  const overdue = unpaid.filter((p) => p.due_date < today);
+  const ending = data.plans.filter((p) => p.end_date === today && p.then_action === "decide" && !p.decided);
+  const list = (ps) => ps.slice(0, 3).map((p) => `${first(p.client_id)} ${money(p.amount_pence)}`).join(", ") + (ps.length > 3 ? ` +${ps.length - 3} more` : "");
+  const lines = [];
+  if (dueToday.length) lines.push(`Due today: ${list(dueToday)}`);
+  if (missed.length) lines.push(`Didn't land yesterday: ${list(missed)}`);
+  for (const p of ending.slice(0, 2)) lines.push(`${first(p.client_id)}'s ${planLabel(p).toLowerCase()} ends today. What's next?`);
+  const monday = weekday === "Mon";
+  if (!lines.length && !(monday && overdue.length)) return null;
+  if (monday && overdue.length > missed.length) lines.push(`Still overdue: ${plural(overdue.length, "payment")}, ${money(sumP(overdue))}`);
+  const title = dueToday.length
+    ? `${dueToday.length} due today · ${money(sumP(dueToday))}`
+    : missed.length
+    ? `${plural(missed.length, "payment")} didn't land`
+    : ending.length
+    ? "A plan ends today"
+    : `${overdue.length} overdue · ${money(sumP(overdue))}`;
+  return { title, body: lines.join("\n"), badge: dueToday.length + overdue.length, url: "/pay/", tag: "morning-" + today };
+}
+
+// Runs every hour from the Worker's cron trigger; sends once a day at the chosen hour (UK time).
+export async function payCron(env) {
+  if (!env.PAY_DB) return;
+  const db = env.PAY_DB;
+  await ensureSchema(db);
+  const settings = await getSettings(db);
+  if (!settings.nudgeOn || londonHour() !== Number(settings.nudgeHour)) return;
+  const today = londonToday();
+  const last = await db.prepare("SELECT value FROM pay_meta WHERE key = 'last_nudge'").first();
+  if (last && last.value === today) return;
+  await db.prepare("INSERT INTO pay_meta (key, value) VALUES ('last_nudge', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(today).run();
+  const msg = composeNudge(await getData(env), londonWeekday());
+  if (msg) await pushAll(db, msg);
 }
 
 export async function handlePay(req, env, url) {
@@ -632,6 +575,7 @@ export async function handlePay(req, env, url) {
     await touchSession(env, s);
     const today = londonToday();
     const now = nowS();
+    await ensureSchema(db);
 
     if (path === "/data" && method === "GET") return json(await getData(env));
 
@@ -697,7 +641,22 @@ export async function handlePay(req, env, url) {
       }
       if (b.name !== undefined) stmts.push(db.prepare("UPDATE pay_users SET name = ? WHERE id = ?").bind(text(b.name, 40), s.userId));
       if (stmts.length) await db.batch(stmts);
-      return json({ ok: true });
+      const patch = {};
+      if (b.goalMonthly !== undefined) patch.goalMonthly = pence(b.goalMonthly, "goal");
+      if (b.goalClients !== undefined) {
+        const n = Number(b.goalClients);
+        if (!Number.isInteger(n) || n < 0 || n > 500) bad("Enter a client goal");
+        patch.goalClients = n;
+      }
+      if (b.chaseTemplate !== undefined) patch.chaseTemplate = text(b.chaseTemplate, 1000) || DEFAULT_CHASE;
+      if (b.nudgeHour !== undefined) {
+        const h = Number(b.nudgeHour);
+        if (!Number.isInteger(h) || h < 5 || h > 21) bad("Pick a time between 5am and 9pm");
+        patch.nudgeHour = h;
+      }
+      if (b.nudgeOn !== undefined) patch.nudgeOn = !!b.nudgeOn;
+      const settings = Object.keys(patch).length ? await saveSettings(db, patch) : await getSettings(db);
+      return json({ ok: true, settings });
     }
 
     if (path === "/password" && method === "POST") {
@@ -719,141 +678,177 @@ export async function handlePay(req, env, url) {
       return json({ ok: true });
     }
 
+
+    // ----- morning nudges -----
+    if (path === "/push/key" && method === "GET") return json({ key: (await vapidKeys(db)).pub });
+    if (path === "/push/subscribe" && method === "POST") {
+      const b = await readBody(req);
+      const endpoint = String(b.endpoint || "");
+      let host = "";
+      try {
+        host = new URL(endpoint).hostname;
+      } catch {}
+      if (!endpoint.startsWith("https://") || endpoint.length > 1000 || !PUSH_HOSTS.some((h) => host === h || host.endsWith("." + h)))
+        bad("That notification subscription isn't valid");
+      const p256dh = String(b.keys?.p256dh || "");
+      const auth = String(b.keys?.auth || "");
+      if (!/^[A-Za-z0-9_-]{80,100}$/.test(p256dh) || !/^[A-Za-z0-9_-]{16,40}$/.test(auth)) bad("That notification subscription isn't valid");
+      await db
+        .prepare(
+          "INSERT INTO pay_push_subs (endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(endpoint) DO UPDATE SET p256dh = excluded.p256dh, auth = excluded.auth, fails = 0"
+        )
+        .bind(endpoint, p256dh, auth, now)
+        .run();
+      const settings = await saveSettings(db, { nudgeOn: true });
+      return json({ ok: true, settings });
+    }
+    if (path === "/push/unsubscribe" && method === "POST") {
+      const b = await readBody(req);
+      await db.prepare("DELETE FROM pay_push_subs WHERE endpoint = ?").bind(String(b.endpoint || "")).run();
+      const left = (await db.prepare("SELECT COUNT(*) AS n FROM pay_push_subs").first()).n;
+      const settings = left ? await getSettings(db) : await saveSettings(db, { nudgeOn: false });
+      return json({ ok: true, settings });
+    }
+    if (path === "/push/test" && method === "POST") {
+      const data = await getData(env);
+      const hour = Number(data.settings.nudgeHour);
+      const real = composeNudge(data, "Mon");
+      const msg = real
+        ? { ...real, tag: "test" }
+        : {
+            title: "Morning nudges are on",
+            body: `You'll get a heads-up at ${hour}:00 on days a payment is due, didn't land, or a plan ends.`,
+            badge: 0,
+            url: "/pay/",
+            tag: "test",
+          };
+      const results = await pushAll(db, msg);
+      return json({ ok: results.some((r) => r >= 200 && r < 300), sent: results.length, results });
+    }
+
     // ----- clients -----
     if (path === "/clients" && method === "POST") {
       const b = await readBody(req);
-      const c = cleanClient(b);
+      const c = cleanClientDetails(b);
+      if (b.plan) cleanPlan(b.plan); // validate before anything is saved
       const r = await db
         .prepare(
-          `INSERT INTO pay_clients (name, tenure, package, programme_weeks, price_pence, method, status, notes, created_at, updated_at)
-           VALUES (?,?,?,?,?,?,?,?,?,?)`
+          `INSERT INTO pay_clients (name, phone, tenure, package, programme_weeks, price_pence, method, status, notes, created_at, updated_at)
+           VALUES (?, ?, ?, 'pt', NULL, 0, 'manual', 'active', ?, ?, ?)`
         )
-        .bind(c.name, c.tenure, c.package, c.programme_weeks, c.price_pence, c.method, c.status, c.notes, now, now)
+        .bind(c.name, c.phone, c.tenure, c.notes, now, now)
         .run();
-      const clientId = r.meta.last_row_id;
-      if (b.next && b.next.due_date) {
-        const p = cleanPayment({
-          client_id: clientId,
-          package: c.package,
-          programme_weeks: c.programme_weeks,
-          amount_pence: c.price_pence,
-          method: c.method,
-          due_date: b.next.due_date,
-        });
-        await insertPayment(db, p, !!b.next.repeat && c.status === "active");
+      const id = r.meta.last_row_id;
+      if (b.plan) {
+        try {
+          await addFirstPlan(db, id, b.plan);
+        } catch (e) {
+          await db.prepare("DELETE FROM pay_clients WHERE id = ?").bind(id).run();
+          throw e;
+        }
       }
-      return json({ ok: true, id: clientId, data: await getData(env) });
+      return json({ ok: true, id, data: await getData(env) });
     }
 
     let m;
-    if ((m = path.match(/^\/clients\/(\d+)$/))) {
+    if ((m = path.match(/^\/clients\/(\d+)(\/plan|\/finish)?$/))) {
       const id = idFrom(m[1]);
-      const before = await requireClient(db, id);
-      if (method === "PUT") {
-        const c = cleanClient(await readBody(req));
-        const stmts = [
-          db
-            .prepare(
-              "UPDATE pay_clients SET name=?, tenure=?, package=?, programme_weeks=?, price_pence=?, method=?, status=?, notes=?, updated_at=? WHERE id=?"
-            )
-            .bind(c.name, c.tenure, c.package, c.programme_weeks, c.price_pence, c.method, c.status, c.notes, now, id),
-        ];
-        if (before.status === "active" && c.status !== "active") {
-          stmts.push(dropFutureGenerated(db, "client_id", id, today));
-        }
-        if (before.status !== "active" && c.status === "active") {
-          // Resume repeats from today; no back-charging for the paused period.
-          stmts.push(db.prepare("UPDATE pay_schedules SET generated_through = ? WHERE client_id = ? AND active = 1").bind(addDays(today, -1), id));
-        }
-        await db.batch(stmts);
+      await requireClient(db, id);
+      if (m[2] === "/plan" && method === "POST") {
+        await switchPlan(db, id, await readBody(req));
         return json({ ok: true, data: await getData(env) });
       }
-      if (method === "DELETE") {
+      if (m[2] === "/finish" && method === "POST") {
+        const b = await readBody(req);
+        await finishClient(db, id, b.date || today);
+        return json({ ok: true, data: await getData(env) });
+      }
+      if (!m[2] && method === "PUT") {
+        const c = cleanClientDetails(await readBody(req));
+        await db
+          .prepare("UPDATE pay_clients SET name = ?, phone = ?, tenure = ?, notes = ?, updated_at = ? WHERE id = ?")
+          .bind(c.name, c.phone, c.tenure, c.notes, now, id)
+          .run();
+        return json({ ok: true, data: await getData(env) });
+      }
+      if (!m[2] && method === "DELETE") {
         const n = await db.prepare("SELECT COUNT(*) AS n FROM pay_payments WHERE client_id = ?").bind(id).first();
-        if (n.n > 0) bad("This client has payments. Set them to Finished instead so the history stays.");
+        if (n.n > 0) bad("This client has payments. Mark them as finished instead so the history stays.");
         await db.batch([
-          db.prepare("DELETE FROM pay_schedules WHERE client_id = ?").bind(id),
+          db.prepare("DELETE FROM pay_plans WHERE client_id = ?").bind(id),
           db.prepare("DELETE FROM pay_clients WHERE id = ?").bind(id),
         ]);
         return json({ ok: true, data: await getData(env) });
       }
     }
 
+    // ----- plans -----
+    if ((m = path.match(/^\/plans\/(\d+)(\/decided)?$/))) {
+      const id = idFrom(m[1]);
+      if (m[2] && method === "POST") {
+        await db.prepare("UPDATE pay_plans SET decided = 1, updated_at = ? WHERE id = ?").bind(now, id).run();
+        return json({ ok: true, data: await getData(env) });
+      }
+      if (!m[2] && method === "PUT") {
+        await editPlan(db, id, await readBody(req));
+        return json({ ok: true, data: await getData(env) });
+      }
+      if (!m[2] && method === "DELETE") {
+        await deletePlan(db, id);
+        return json({ ok: true, data: await getData(env) });
+      }
+    }
+
     // ----- payments -----
     if (path === "/payments" && method === "POST") {
-      const b = await readBody(req);
-      const p = cleanPayment(b);
-      const client = await requireClient(db, p.client_id);
-      await insertPayment(db, p, !!b.repeat && client.status === "active");
+      const p = cleanPayment(await readBody(req));
+      await requireClient(db, p.client_id);
+      await db
+        .prepare(
+          `INSERT INTO pay_payments (client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, created_at, updated_at)
+           VALUES (?, NULL, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .bind(p.client_id, p.package, p.programme_weeks, p.amount_pence, p.due_date, p.method, p.paid_date, p.notes, now, now)
+        .run();
       return json({ ok: true, data: await getData(env) });
     }
-    if ((m = path.match(/^\/payments\/(\d+)(\/paid)?$/))) {
+    if ((m = path.match(/^\/payments\/(\d+)(\/paid|\/chase)?$/))) {
       const id = idFrom(m[1]);
       const existing = await db.prepare("SELECT * FROM pay_payments WHERE id = ?").bind(id).first();
       if (!existing) bad("Payment not found");
-      if (m[2] && method === "POST") {
+      if (m[2] === "/paid" && method === "POST") {
         const b = await readBody(req);
         const paid = b.paid_date === null ? null : b.paid_date || today;
         if (paid !== null && !isDate(paid)) bad("Paid date isn't valid");
         await db.prepare("UPDATE pay_payments SET paid_date = ?, updated_at = ? WHERE id = ?").bind(paid, now, id).run();
         return json({ ok: true, data: await getData(env) });
       }
+      if (m[2] === "/chase" && method === "POST") {
+        const r = await db
+          .prepare("UPDATE pay_payments SET chase_count = chase_count + 1, chased_at = ?, updated_at = ? WHERE id = ? RETURNING chase_count, chased_at")
+          .bind(today, now, id)
+          .first();
+        return json({ ok: true, ...r });
+      }
       if (!m[2] && method === "PUT") {
         const p = cleanPayment(await readBody(req));
         await requireClient(db, p.client_id);
-        await db
-          .prepare(
-            "UPDATE pay_payments SET client_id=?, package=?, programme_weeks=?, amount_pence=?, due_date=?, method=?, paid_date=?, notes=?, updated_at=? WHERE id=?"
-          )
-          .bind(p.client_id, p.package, p.programme_weeks, p.amount_pence, p.due_date, p.method, p.paid_date, p.notes, now, id)
-          .run();
+        if (existing.auto && p.client_id !== existing.client_id) bad("This payment comes from a plan, so it stays with that client.");
+        try {
+          await db
+            .prepare(
+              "UPDATE pay_payments SET client_id=?, package=?, programme_weeks=?, amount_pence=?, due_date=?, method=?, paid_date=?, notes=?, updated_at=? WHERE id=?"
+            )
+            .bind(p.client_id, p.package, p.programme_weeks, p.amount_pence, p.due_date, p.method, p.paid_date, p.notes, now, id)
+            .run();
+        } catch (e) {
+          if (/UNIQUE/i.test(String(e && e.message))) bad("There's already a payment from this plan on that date.");
+          throw e;
+        }
         return json({ ok: true, data: await getData(env) });
       }
       if (!m[2] && method === "DELETE") {
         await db.prepare("DELETE FROM pay_payments WHERE id = ?").bind(id).run();
-        return json({ ok: true, data: await getData(env) });
-      }
-    }
-
-    // ----- repeat rules -----
-    if ((m = path.match(/^\/schedules\/(\d+)(\/stop)?$/))) {
-      const id = idFrom(m[1]);
-      const sch = await db.prepare("SELECT * FROM pay_schedules WHERE id = ?").bind(id).first();
-      if (!sch) bad("Repeat not found");
-      if (m[2] && method === "POST") {
-        await db.batch([
-          db.prepare("UPDATE pay_schedules SET active = 0, updated_at = ? WHERE id = ?").bind(now, id),
-          dropFutureGenerated(db, "schedule_id", id, today),
-        ]);
-        return json({ ok: true, data: await getData(env) });
-      }
-      if (!m[2] && method === "PUT") {
-        const b = await readBody(req);
-        const pkg = oneOf(b.package, PACKAGES, "Pick a package");
-        const weeks = weeksFor(pkg, b.programme_weeks);
-        const amount = pence(b.amount_pence);
-        const meth = oneOf(b.method, METHODS, "Pick a payment method");
-        const day = Number(b.day_of_month);
-        if (!Number.isInteger(day) || day < 1 || day > 31) bad("Pick a day of the month");
-        const stmts = [
-          db
-            .prepare("UPDATE pay_schedules SET package=?, programme_weeks=?, amount_pence=?, method=?, day_of_month=?, updated_at=? WHERE id=?")
-            .bind(pkg, weeks, amount, meth, day, now, id),
-        ];
-        if (day !== sch.day_of_month) {
-          // Re-plan upcoming dates on the new day; anything due today or earlier is left alone.
-          stmts.push(dropFutureGenerated(db, "schedule_id", id, today));
-          stmts.push(db.prepare("UPDATE pay_schedules SET generated_through = ? WHERE id = ?").bind(today, id));
-        } else {
-          stmts.push(
-            db
-              .prepare(
-                "UPDATE pay_payments SET package=?, programme_weeks=?, amount_pence=?, method=?, updated_at=? WHERE schedule_id=? AND paid_date IS NULL AND due_date >= ?"
-              )
-              .bind(pkg, weeks, amount, meth, now, id, today)
-          );
-        }
-        await db.batch(stmts);
         return json({ ok: true, data: await getData(env) });
       }
     }

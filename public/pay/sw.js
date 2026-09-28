@@ -1,7 +1,8 @@
-// TrueStay Pay service worker: keeps the app shell available for a fast, app-like start.
-// Network first (so updates land straight away), cached copy if offline. Never touches /api.
-const CACHE = "ts-pay-v2";
-const SHELL = ["./", "app.css?v=2", "app.js?v=2", "manifest.webmanifest", "icons/apple-touch-icon.png"];
+// TrueStay Pay service worker
+//  - keeps the app shell available for a fast, app-like start (network first, cached copy if offline; never touches /api)
+//  - shows the morning nudge and keeps the app-icon badge up to date
+const CACHE = "ts-pay-v3";
+const SHELL = ["./", "app.css?v=3", "app.js?v=3", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -24,5 +25,39 @@ self.addEventListener("fetch", (e) => {
         return res;
       })
       .catch(() => caches.match(e.request).then((r) => r || caches.match("./")))
+  );
+});
+
+// Morning nudge
+self.addEventListener("push", (e) => {
+  let d = {};
+  try {
+    d = e.data ? e.data.json() : {};
+  } catch {
+    d = { body: e.data ? e.data.text() : "" };
+  }
+  const jobs = [
+    self.registration.showNotification(d.title || "TrueStay Pay", {
+      body: d.body || "",
+      icon: "icons/icon-192.png",
+      badge: "icons/icon-192.png",
+      tag: d.tag || "nudge",
+      data: { url: d.url || "./" },
+    }),
+  ];
+  if (typeof d.badge === "number" && self.navigator && "setAppBadge" in self.navigator) {
+    jobs.push((d.badge > 0 ? self.navigator.setAppBadge(d.badge) : self.navigator.clearAppBadge()).catch(() => {}));
+  }
+  e.waitUntil(Promise.all(jobs));
+});
+
+self.addEventListener("notificationclick", (e) => {
+  e.notification.close();
+  const url = new URL((e.notification.data && e.notification.data.url) || "./", self.registration.scope).href;
+  e.waitUntil(
+    self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
+      for (const w of wins) if (w.url.startsWith(self.registration.scope) && "focus" in w) return w.focus();
+      return self.clients.openWindow(url);
+    })
   );
 });

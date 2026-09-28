@@ -2,7 +2,7 @@
 // Static pages live in /public (each tool gets its own folder, e.g. /public/checkin/).
 // Anything under /api/* runs here, so tools can have real backends (D1, KV, etc).
 
-import { handlePay } from "./pay.js";
+import { handlePay, payCron } from "./pay.js";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -27,5 +27,10 @@ export default {
     }
 
     return env.ASSETS.fetch(request);
+  },
+
+  // Hourly cron (see wrangler.jsonc). TrueStay Pay sends its morning nudge at the chosen UK hour.
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(payCron(env));
   },
 };
