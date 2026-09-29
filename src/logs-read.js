@@ -227,7 +227,12 @@ function cleanNutrient(v, key, fixes) {
       fixes.push(`kcal: ${eaten} didn't match the text "${text}"`);
       eaten = num(n, lo, hi, 1);
     }
-    if (wrongLabel) fixes.push(`kcal: the copied text "${text}" isn't the eaten number`);
+    // the number it gave as eaten is the one printed as remaining, over, burned or the goal
+    if (wrongLabel && n != null && eaten != null && Math.abs(n - eaten) <= 1) {
+      fixes.push(`kcal: ${eaten} is the "${text}" number, not what was eaten`);
+      eaten = null;
+    }
+
   }
   return { eaten, goal, text };
 }
@@ -278,7 +283,8 @@ export function cleanReading(o) {
       fat_goal: f.goal,
       fat_text: f.text,
     };
-    if ([day.kcal, day.protein, day.carbs, day.fat].every((v) => v == null)) day = null;
+    // nothing usable, unless it did copy a calories label (then a second look can find the eaten number)
+    if ([day.kcal, day.protein, day.carbs, day.fat].every((v) => v == null) && !kc.text) day = null;
   }
   if (screen === "diary_part" && day && day.kcal != null) screen = "day_summary"; // a diary that does show the day's total
   if (screen === "day_summary" && !day) screen = arr(o.meals).length ? "diary_part" : "other";
@@ -388,6 +394,7 @@ export function checkReading(r) {
   const out = [];
   const d = r.day;
   if (d) {
+    if (d.kcal == null && r.screen === "day_summary") out.push({ field: "kcal", issue: "no_eaten" });
     for (const k of ["protein", "carbs", "fat"]) {
       if (d[k] != null && d[k + "_goal"] != null && d[k] === d[k + "_goal"] && d[k] > 0 && !parsePair(d[k + "_text"])) out.push({ field: k, issue: "eaten_is_goal" });
     }
