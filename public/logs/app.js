@@ -388,13 +388,15 @@
     if (!r || !(r.v >= 2)) return null;
     if (rec && rec.demoted.includes(it.id)) return "A meal";
     if (r.screen === "day_summary") return "Day total";
-    if (r.screen === "meal") {
-      const m = (r.meals || [])[0];
-      return m && m.name ? m.name.replace(/^./, (c) => c.toUpperCase()) : "A meal";
+    const m = (r.meals || [])[0];
+    const cap = (n) => n.replace(/^./, (c) => c.toUpperCase());
+    if (r.screen === "meal") return m && m.name ? cap(m.name) : "A meal";
+    if (r.screen === "diary_part") {
+      const logged = (r.meals || []).filter((x) => x.logged !== false);
+      return logged.length === 1 ? (logged[0].name ? cap(logged[0].name) : "A meal") : "Meals";
     }
-    if (r.screen === "diary_part") return "Meals";
-    if (r.screen === "food_item") return "One food";
-    if (r.screen === "period_summary") return "Week";
+    if (r.screen === "food_item") return m && (m.foods || []).length > 1 ? "A meal" : "One food";
+    if (r.screen === "period_summary") return r.steps && r.steps.count != null ? null : "Summary";
     return null;
   }
   const thumbTag = (it, rec) => {

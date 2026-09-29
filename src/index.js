@@ -3,7 +3,7 @@
 // Anything under /api/* runs here, so tools can have real backends (D1, KV, etc).
 
 import { handlePay, payCron } from "./pay.js";
-import { handleLogsShare, handleLogsDev, logsCron, readerFetch } from "./logs.js";
+import { handleLogsShare, logsCron, readerFetch } from "./logs.js";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -21,11 +21,6 @@ export default {
 
     if (url.pathname === "/api/pay" || url.pathname.startsWith("/api/pay/")) {
       return handlePay(request, env, url, ctx);
-    }
-
-    // TEMPORARY: checking the new screenshot reader (see handleLogsDev)
-    if (url.pathname.startsWith("/api/logs/dev/")) {
-      return handleLogsDev(request, env, url, ctx);
     }
 
     // TrueStay Logs share button (iPhone Shortcut). The app's own routes live under /api/pay/logs.

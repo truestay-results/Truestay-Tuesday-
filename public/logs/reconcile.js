@@ -286,7 +286,7 @@
       Object.assign(food, { kcal: d.kcal, protein: d.protein, carbs: d.carbs, fat: d.fat, src: "total" });
       Object.defineProperty(food, "fromItem", { value: it, enumerable: false });
       conf = "high";
-      if (demoted.size) info.push(`${demoted.size === 1 ? "A meal screenshot" : `${demoted.size} meal screenshots`} counted as meals, not the day`);
+      if (demoted.size) info.push(`${demoted.size === 1 ? "One screenshot looked like a day total but was a single meal, so it's counted as that meal" : `${demoted.size} screenshots looked like day totals but were single meals, so they're counted as meals`}`);
       const unsure = it.r.unsure || [];
       if (unsure.includes("kcal")) {
         conf = "low";
@@ -355,12 +355,13 @@
         food.partial = true;
         notes.push(`Only ${listAnd(known.map(mealLabel))} sent`);
       } else if (missingCount === 1) {
-        const miss = missing.length === 1 ? `No ${SLOT_NAME[missing[0]]} screenshot` : "One of the main meals has no screenshot";
+        const miss = missing.length === 1 ? `No ${SLOT_NAME[missing[0]]} screenshot` : `No screenshot for ${listAnd(missing.map((m) => SLOT_NAME[m]))} (one meal's name was cut off)`;
         if (ref && food.kcal < 0.6 * ref) {
           conf = "low";
           food.partial = true;
-        }
-        notes.push(miss);
+          notes.push(miss);
+        } else if (!ref || food.kcal < 0.85 * ref) notes.push(miss);
+        else info.push(`${miss}, but the total looks like a full day`);
       }
       if (conf !== "low" && ref && food.kcal != null && food.kcal < 0.45 * ref) {
         conf = "low";
@@ -419,17 +420,21 @@
       else if (!it.edited && v2(it) && it.r.steps && it.r.steps.count != null) cands.push({ value: it.r.steps.count, approx: !!it.r.steps.approx, t: it.t || 0, it });
       else if (!it.edited && !v2(it) && it.steps != null) cands.push({ value: it.steps, approx: it.kind === "food_steps" && it.steps % 100 === 0, t: it.t || 0, it, old: true });
     }
+    // A day's steps only go up, and apps sync at different times, so the highest count is the most complete one
+    // (a lower figure is an earlier or stale sync). An exact count beats a rounded one (11.2k) that agrees with it.
     const typedSteps = cands.filter((c) => c.typed);
-    let pick = typedSteps.length ? typedSteps[typedSteps.length - 1] : cands[cands.length - 1];
+    let pick = typedSteps.length ? typedSteps[typedSteps.length - 1] : cands.slice().sort((a, b) => b.value - a.value || (a.approx ? 1 : 0) - (b.approx ? 1 : 0))[0];
     if (pick && pick.approx) {
       const exact = cands.filter((c) => !c.approx && Math.abs(c.value - pick.value) <= 50);
-      if (exact.length) pick = exact[exact.length - 1];
+      if (exact.length) pick = exact.sort((a, b) => b.value - a.value)[0];
     }
     if (pick) {
       steps.value = pick.value;
       steps.approx = pick.approx;
       steps.conf = pick.typed ? "high" : pick.approx ? "medium" : "high";
       if (pick.approx) steps.note = "Rounded on the screenshot";
+      const lower = cands.filter((c) => !c.typed && c !== pick && c.value < pick.value - 500 && Math.abs((c.t || 0) - (pick.t || 0)) < 3600);
+      if (!pick.typed && lower.length) info.push(`Steps: used ${fmt(pick.value)}; another app showed ${fmt(lower[0].value)}, which hadn't caught up`);
       if (!pick.typed && pick.it.lag === 0 && pick.it.clockMin != null && pick.it.clockMin < 17 * 60) {
         steps.conf = "low";
         steps.note = `Taken at ${hhmm(pick.it.clockMin)}, before the day was over`;
@@ -440,8 +445,10 @@
     const extras = [];
     for (const it of ordered) {
       const week = v2(it) && it.r.screen === "period_summary";
+      const stepsShot = v2(it) && it.r.screen === "steps";
       for (const e of it.extras || []) {
         if (week && !/weight/i.test(e.label)) continue;
+        if (stepsShot && /^burned$/i.test(e.label)) continue;
         if (/average|avg/i.test(e.label + " " + e.value)) continue;
         if (!extras.some((x) => x.label.toLowerCase() === e.label.toLowerCase())) extras.push(e);
       }

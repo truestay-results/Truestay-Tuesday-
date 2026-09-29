@@ -276,9 +276,18 @@
     if (macroOut && f.floor) return `${Math.round(f.missingMacroKcal).toLocaleString("en-GB")} kcal with no macros`;
     if (macroOut) return "Macros unsure";
     if (rec.steps.value != null && !inc.steps) return "Steps taken early";
-    if (f.src === "meals") return `Added up from ${f.meals.length} meal${f.meals.length === 1 ? "" : "s"}`;
-    if (f.src === "typed") return "Typed by you";
-    return "";
+    // counted days: what's worth knowing, in a few words
+    const bits = [];
+    if (f.src === "meals") bits.push(`Added up from ${f.meals.length} meal${f.meals.length === 1 ? "" : "s"}`);
+    if (f.src === "typed") bits.push("Typed by you");
+    const names = { breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner" };
+    const emptyMain = ["breakfast", "lunch", "dinner"].filter((x) => (f.empty || []).includes(x)).map((x) => names[x]);
+    if (emptyMain.length && f.kcal != null) bits.push(`${emptyMain.join(", ")} not logged`);
+    if (f.alcoholKcal >= 300) bits.push(`${Math.round(f.alcoholKcal).toLocaleString("en-GB")} kcal drinks`);
+    const two = bits.slice(0, 2);
+    // short enough for the column: "not logged" becomes "empty" when it shares the line
+    if (two.length === 2) two[0] = two[0].replace(/ not logged$/, " empty");
+    return two.join("; ");
   }
   // One line for the top of each day's screenshots: how its numbers were put together.
   function dayHow(rec) {
@@ -414,13 +423,13 @@
 
     // day table
     const cols = [
-      { k: "day", t: "Day", w: 80, align: "left" },
-      { k: "kcal", t: "Calories", w: 64, hit: hitK },
+      { k: "day", t: "Day", w: 76, align: "left" },
+      { k: "kcal", t: "Calories", w: 62, hit: hitK },
       { k: "protein", t: "Protein g", w: 62, hit: hitP },
-      { k: "carbs", t: "Carbs g", w: 54 },
-      { k: "fat", t: "Fat g", w: 46 },
+      { k: "carbs", t: "Carbs g", w: 52 },
+      { k: "fat", t: "Fat g", w: 44 },
       { k: "steps", t: "Steps", w: 60, hit: hitS },
-      { k: "check", t: "Check", w: 157.28, align: "left" },
+      { k: "check", t: "Check", w: 167.28, align: "left" },
     ];
     const drawHead = (yy) => {
       let x = M;
@@ -443,7 +452,8 @@
           const v = t[c.k];
           const out = row && v != null && !counts(row, c.k);
           const floor = rec && rec.food.floor && ["protein", "carbs", "fat"].includes(c.k) && v != null;
-          const txt = v == null ? "–" : fmt(v) + (floor ? "+" : "") + (out ? "?" : "");
+          const approx = rec && c.k === "steps" && rec.steps.approx && v != null;
+          const txt = v == null ? "–" : (approx ? "~" : "") + fmt(v) + (floor ? "+" : "") + (out ? "?" : "");
           d.text(txt, x + c.w - (out ? 8 : 14), yy, { size: 9.2, bold, color: v == null || out ? INK2 : INK, align: "right" });
           if (!bold && !out && c.hit && c.hit(v)) d.tick(x + c.w - 11, yy - 7.4, 8, INK);
         }
@@ -484,10 +494,13 @@
     if (col("protein").length || lo("protein").length) avgParts.push(`protein ${col("protein").length} of ${col("protein").length + lo("protein").length}`);
     if (col("steps").length || lo("steps").length) avgParts.push(`steps ${col("steps").length} of ${col("steps").length + lo("steps").length}`);
     if (lo("kcal").length || lo("protein").length || lo("steps").length) {
-      notes.push({ t: `Averages only use days the checks trust (or you counted): ${avgParts.join(", ")}. A number with a ? was left out; a number with a + is too low because some food was logged without macros.` });
+      notes.push({ t: `Averages only use the days the checks trust, plus any day you chose to count in the app: ${avgParts.join(", ")}. A number with a ? was left out; a number with a + is too low because some food was logged without macros.` });
       if (lo("kcal").length) notes.push({ t: `Calories left out: ${why("kcal")}.` });
       const pOnly = lo("protein").filter((x) => !lo("kcal").includes(x));
-      if (pOnly.length) notes.push({ t: `Protein, carbs and fat also left out: ${dayList(pOnly)} (${pOnly.every((x) => x.rec && x.rec.food.floor) ? "food logged with no macros" : "macros not certain"}).` });
+      if (pOnly.length)
+        notes.push({
+          t: `Protein, carbs and fat leave out ${lo("kcal").length ? `the ${lo("kcal").length === 1 ? "day" : lo("kcal").length + " days"} above and ` : ""}${dayList(pOnly)} (${pOnly.every((x) => x.rec && x.rec.food.floor) ? "food logged with no macros" : "macros not certain"}).`,
+        });
       const sOnly = lo("steps");
       if (sOnly.length) notes.push({ t: `Steps left out: ${why("steps")}.` });
     }
@@ -498,6 +511,7 @@
       if (T.steps) parts.push(`steps ${fmt(T.steps)} or more`);
       notes.push({ tick: true, t: `On target: ${parts.join(", ")}.` });
     }
+    if (days.some((x) => x.rec && x.rec.steps.approx && x.rec.steps.value != null)) notes.push({ t: "~ steps rounded on the screenshot (e.g. 11.2k), used when there was no exact count." });
     if (undated.length) notes.push({ t: `${undated.length} screenshot${undated.length === 1 ? " has" : "s have"} no day set and ${undated.length === 1 ? "is" : "are"} at the end.` });
     for (const nt of notes) {
       const lines = wrap(nt.t, false, 8.2, PW - 2 * M - 12);
@@ -531,10 +545,24 @@
       const isFood = it.kind === "food" || it.kind === "food_steps";
       if (r && r.v >= 2) {
         const m = (r.meals || [])[0];
+        const logged = (r.meals || []).filter((x) => x.logged !== false);
         const what =
-          rec && rec.demoted.includes(it.id) ? "A meal" : r.screen === "day_summary" ? "Day total" : r.screen === "meal" ? (m && m.name) || "A meal" : r.screen === "diary_part" ? "Meals" : r.screen === "period_summary" ? "Week" : r.screen === "food_item" ? "One food" : null;
+          rec && rec.demoted.includes(it.id)
+            ? "A meal"
+            : r.screen === "day_summary"
+            ? "Day total"
+            : r.screen === "meal"
+            ? (m && m.name) || "A meal"
+            : r.screen === "diary_part"
+            ? logged.length === 1 ? logged[0].name || "A meal" : "Meals"
+            : r.screen === "period_summary"
+            ? r.steps && r.steps.count != null ? null : "Summary"
+            : r.screen === "food_item"
+            ? m && (m.foods || []).length > 1 ? "A meal" : "One food"
+            : null;
         if (what && isFood) return it.kcal != null ? `${what} · ${fmt(it.kcal)} kcal` : what;
         if (what) return what;
+        if (r.steps && r.steps.count != null) return `Steps · ${fmt(r.steps.count)}`;
       }
       const k = kindLabel[it.kind] || "Screenshot";
       if (isFood && it.kcal != null) return `${k} · ${fmt(it.kcal)} kcal`;
@@ -547,7 +575,7 @@
       const q = (k) => (rec && t[k] != null && !rec.include[k] ? "?" : "");
       const plus = rec && rec.food.floor ? "+" : "";
       if (t.kcal != null) p.push(`${fmt(t.kcal)}${q("kcal")} kcal`);
-      const mac = [t.protein != null ? `P ${fmt(t.protein)}${plus}${q("protein")} g` : null, t.carbs != null ? `C ${fmt(t.carbs)}${plus} g` : null, t.fat != null ? `F ${fmt(t.fat)}${plus} g` : null].filter(Boolean);
+      const mac = [t.protein != null ? `P ${fmt(t.protein)}${plus}${q("protein")} g` : null, t.carbs != null ? `C ${fmt(t.carbs)}${plus}${q("carbs")} g` : null, t.fat != null ? `F ${fmt(t.fat)}${plus}${q("fat")} g` : null].filter(Boolean);
       if (mac.length) p.push(mac.join("  "));
       if (t.steps != null) p.push(`${rec && rec.steps.approx ? "about " : ""}${fmt(t.steps)}${q("steps")} steps`);
       for (const e of (t.extras || []).slice(0, 2)) p.push(`${e.label} ${e.value}`);
