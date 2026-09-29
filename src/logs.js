@@ -956,7 +956,7 @@ export async function handleLogsDev(req, env, url, ctx) {
   if (!m || !tok || !(Number(until) > nowS()) || !safeEqual(await sha256hex(m[1]), await sha256hex(tok))) return plain("Not found", 404);
   const rest = m[2];
   let mm;
-  if ((mm = rest.match(/^trial\/(\d+)$/))) {
+  if ((mm = rest.match(/^trial\/(\d+)(?:\/[A-Za-z0-9_-]*)?$/))) {
     const id = Number(mm[1]);
     const it = await db.prepare("SELECT id, mime FROM logs_items WHERE id = ?").bind(id).first();
     if (!it) return json({ ok: false, error: "no such item" }, 404);
