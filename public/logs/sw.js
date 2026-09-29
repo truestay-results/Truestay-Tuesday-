@@ -1,7 +1,7 @@
 // TrueStay Logs service worker: keeps the app shell available for a fast, app-like start.
 // Network first with a cached copy if offline. Never touches /api.
-const CACHE = "ts-logs-v1";
-const SHELL = ["./", "app.css?v=1", "app.js?v=1", "pdf.js?v=1", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png"];
+const CACHE = "ts-logs-v2";
+const SHELL = ["./", "app.css?v=2", "app.js?v=2", "pdf.js?v=2", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

@@ -480,7 +480,7 @@
       ${readingBanner(open)}
       ${
         !S.data.key
-          ? `<button class="setup-card" data-action="setup"><span class="ico">${ic("share")}</span><span><span class="t">Set up the WhatsApp share button</span><span class="d" style="display:block">Send screenshots straight from a chat. Takes about 5 minutes, once.</span></span><span class="chev">${ic("right")}</span></button>`
+          ? `<button class="setup-card" data-action="setup"><span class="ico">${ic("share")}</span><span><span class="t">Set up the WhatsApp share button</span><span class="d" style="display:block">Send screenshots straight from a chat. A couple of minutes, once.</span></span><span class="chev">${ic("right")}</span></button>`
           : ""
       }
       ${
@@ -638,7 +638,7 @@
           S.data.key
             ? `<button class="row" data-action="setup"><span class="ic">${ic("share")}</span><span class="l">How to set it up<small>Step by step, with your two links</small></span><span class="r">${ic("right")}</span></button>
                <button class="row" data-action="newkey"><span class="ic">${ic("key")}</span><span class="l">Make new links<small>The old ones stop working, so you'd update the Shortcut</small></span><span class="r">${ic("right")}</span></button>`
-            : `<button class="row" data-action="setup"><span class="ic">${ic("share")}</span><span class="l">Set it up<small>About 5 minutes on your iPhone, once</small></span><span class="r">${ic("right")}</span></button>`
+            : `<button class="row" data-action="setup"><span class="ic">${ic("share")}</span><span class="l">Set it up<small>A couple of minutes on your iPhone, once</small></span><span class="r">${ic("right")}</span></button>`
         }
       </div>
       <div class="group-title">Look</div>
@@ -1510,12 +1510,12 @@
   }
 
   // ---------- share button setup ----------
-  function copyText(t) {
-    const done = () => toast("Link copied");
-    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, () => fallbackCopy(t));
-    else fallbackCopy(t);
+  function copyText(t, msg = "Link copied") {
+    const done = () => toast(msg);
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(t).then(done, () => fallbackCopy(t, msg));
+    else fallbackCopy(t, msg);
   }
-  function fallbackCopy(t) {
+  function fallbackCopy(t, msg = "Link copied") {
     const ta = document.createElement("textarea");
     ta.value = t;
     ta.setAttribute("readonly", "");
@@ -1525,7 +1525,7 @@
     ta.select();
     try {
       document.execCommand("copy");
-      toast("Link copied");
+      toast(msg);
     } catch {
       toast("Couldn't copy. Press and hold the link instead.");
     }
@@ -1544,32 +1544,61 @@
     const k = encodeURIComponent(S.data.key);
     const clientsUrl = `${location.origin}/api/logs/clients?k=${k}`;
     const uploadUrl = `${location.origin}/api/logs/upload?k=${k}`;
+    // iOS 27: tapping + in Shortcuts opens "Describe a Shortcut" (Apple Intelligence builds it from this)
+    const desc =
+      `Make a shortcut called Send to Logs that shows in the share sheet and takes images. ` +
+      `First, get contents of URL ${clientsUrl}, split the text by new lines, and choose from the list with the prompt "Who are these for?". ` +
+      `Then repeat with each item in the shortcut input: convert the image to JPEG, then get contents of URL ${uploadUrl} ` +
+      `with method POST and request body Form, with a text field named client set to the chosen item and a file field named photo set to the converted image. ` +
+      `After the repeat, show a notification with the contents of URL.`;
     const box = (u, id) => `<div class="copybox"><code>${esc(u)}</code><button class="btn sm lime" data-copy="${id}">${ic("copy")} Copy</button></div>`;
     openSheet(
       "WhatsApp share button",
       `<div class="form">
-        <p class="hint">You make a small Shortcut once. After that: in WhatsApp, pick the screenshots, tap Share, tap <b>Send to Logs</b>, pick the client. Works for 1 or 50.</p>
+        <p class="hint">Once it's set up: in WhatsApp, pick the screenshots, tap Share, tap <b>Send to Logs</b>, pick the client. Works for 1 or 50.</p>
         <div class="steps">
-          <div class="step"><div>Open the <b>Shortcuts</b> app, tap <b>+</b>, and name the new shortcut <b>Send to Logs</b>.</div></div>
-          <div class="step"><div>Tap the <b>i</b> at the bottom and switch on <b>Show in Share Sheet</b>. Back in the shortcut, tap the input at the top and set it to receive <b>Images</b>.</div></div>
-          <div class="step"><div>Add the action <b>Get Contents of URL</b> and paste this link in:${box(clientsUrl, "c")}</div></div>
-          <div class="step"><div>Add <b>Split Text</b>, and set it to split by <b>New Lines</b>.</div></div>
-          <div class="step"><div>Add <b>Choose from List</b>. Tap Show More and set the prompt to <b>Who are these for?</b></div></div>
-          <div class="step"><div>Add <b>Repeat with Each</b>, and make it repeat with <b>Shortcut Input</b>.</div></div>
-          <div class="step"><div>Inside the repeat, add <b>Convert Image</b> and set it to convert <b>Repeat Item</b> to <b>JPEG</b>. That keeps them small.</div></div>
-          <div class="step"><div>Still inside the repeat, add another <b>Get Contents of URL</b> with this link:${box(uploadUrl, "u")}
-            <div class="sub" style="margin-top:8px">Tap Show More. Set Method to <b>POST</b> and Request Body to <b>Form</b>. Add a <b>Text</b> field called <b>client</b> set to <b>Chosen Item</b>, and a <b>File</b> field called <b>photo</b> set to <b>Converted Image</b>.</div>
-            <div class="sub" style="margin-top:6px">Optional, helps with dates: add a <b>Text</b> field called <b>name</b>, set it to <b>Repeat Item</b>, tap that and pick <b>Name</b>.</div></div></div>
-          <div class="step"><div>Under <b>End Repeat</b>, add <b>Show Notification</b> and set its text to <b>Contents of URL</b> (the one from the step above). That tells you it worked.</div></div>
-          <div class="step"><div>Try it: in a client's WhatsApp chat, press and hold a screenshot, tap <b>Share</b>, pick <b>Send to Logs</b>, then the client.
+          <div class="step"><div><b>Copy the description.</b> Your private links are already in it.
+            <button class="btn lime" data-copy="d" style="margin-top:10px">${ic("copy")} Copy the description</button></div></div>
+          <div class="step"><div>Open the <b>Shortcuts</b> app and tap <b>+</b>. Paste into <b>Describe a Shortcut</b> and let it build.</div></div>
+          <div class="step"><div>Check it has these steps. If one's off, tap <b>Describe a change</b> and say what to fix, or tap the step and fix it by hand.
+            <ol class="mini-list">
+              <li>Takes <b>Images</b> from the Share Sheet</li>
+              <li>Get Contents of URL, the clients link</li>
+              <li>Split Text by New Lines</li>
+              <li>Choose from List, "Who are these for?"</li>
+              <li>Repeat with each item in Shortcut Input</li>
+              <li>Inside the repeat: Convert Image to JPEG</li>
+              <li>Inside the repeat: Get Contents of URL, the upload link. Method <b>POST</b>, Request Body <b>Form</b>, with <b>client</b> set to Chosen Item and <b>photo</b> (a File) set to Converted Image</li>
+              <li>After the repeat: Show Notification with Contents of URL</li>
+            </ol></div></div>
+          <div class="step"><div>In the shortcut's details, make sure <b>Show in Share Sheet</b> is on.</div></div>
+          <div class="step"><div>Try it: in a client's WhatsApp chat, press and hold a screenshot, tap <b>Share</b>, pick <b>Send to Logs</b>, then the client. You should get a notification saying <b>Saved for</b> them.
             <div class="sub">For lots at once, open the chat's Media, tap Select, tick them, then Share.</div></div></div>
         </div>
-        <div class="status-line warn">${ic("key")}<span>Keep these links to yourself. Anyone with them could add pictures to your Logs. If one gets out, make new links in Settings.</span></div>
+        <details class="manual">
+          <summary>Build it by hand instead</summary>
+          <div class="steps">
+            <div class="step"><div>In Shortcuts, tap <b>+</b>, skip Describe a Shortcut to build it yourself, and name it <b>Send to Logs</b>.</div></div>
+            <div class="step"><div>In its details, switch on <b>Show in Share Sheet</b>, and set it to receive <b>Images</b>.</div></div>
+            <div class="step"><div>Add <b>Get Contents of URL</b> with this link:${box(clientsUrl, "c")}</div></div>
+            <div class="step"><div>Add <b>Split Text</b>, split by <b>New Lines</b>.</div></div>
+            <div class="step"><div>Add <b>Choose from List</b>, prompt <b>Who are these for?</b></div></div>
+            <div class="step"><div>Add <b>Repeat with Each</b>, repeating with <b>Shortcut Input</b>.</div></div>
+            <div class="step"><div>Inside the repeat, add <b>Convert Image</b>: <b>Repeat Item</b> to <b>JPEG</b>.</div></div>
+            <div class="step"><div>Inside the repeat, add <b>Get Contents of URL</b> with this link:${box(uploadUrl, "u")}
+              <div class="sub" style="margin-top:8px">Method <b>POST</b>, Request Body <b>Form</b>. A <b>Text</b> field <b>client</b> set to <b>Chosen Item</b>, and a <b>File</b> field <b>photo</b> set to <b>Converted Image</b>.</div></div></div>
+            <div class="step"><div>After <b>End Repeat</b>, add <b>Show Notification</b> with <b>Contents of URL</b>.</div></div>
+          </div>
+        </details>
+        <div class="status-line warn">${ic("key")}<span>Keep the description and links to yourself. Anyone with them could add pictures to your Logs. If they get out, make new links in Settings.</span></div>
+        <p class="hint">No time for this? <b>Add screenshots</b>, then <b>Import a WhatsApp chat</b>, needs no setup at all.</p>
       </div>`,
       (sh) => {
         sh.addEventListener("click", (ev) => {
           const b = ev.target.closest("[data-copy]");
-          if (b) copyText(b.dataset.copy === "c" ? clientsUrl : uploadUrl);
+          if (!b) return;
+          const which = b.dataset.copy;
+          copyText(which === "d" ? desc : which === "c" ? clientsUrl : uploadUrl, which === "d" ? "Description copied. Now paste it in Shortcuts." : "Link copied");
         });
       }
     );

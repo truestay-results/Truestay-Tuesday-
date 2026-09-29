@@ -304,6 +304,14 @@ svg { display: block; }
 .copybox { display: flex; gap: 8px; align-items: center; margin-top: 8px; background: var(--surface-2); border-radius: 14px; padding: 6px 6px 6px 12px; border: 1px solid var(--line); }
 .copybox code { flex: 1; min-width: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; word-break: break-all; color: var(--ink-2); }
 .copybox .btn { flex: 0 0 auto; }
+.mini-list { margin: 10px 0 0 18px; display: grid; gap: 6px; font-size: 14px; color: var(--ink-2); line-height: 1.35; }
+.mini-list li::marker { color: var(--muted); font-variant-numeric: tabular-nums; }
+details.manual { border: 1px solid var(--line); border-radius: 18px; background: var(--surface); }
+details.manual summary { min-height: 52px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 16px; font-weight: 600; cursor: pointer; list-style: none; }
+details.manual summary::-webkit-details-marker { display: none; }
+details.manual summary::after { content: ""; width: 9px; height: 9px; border-right: 2px solid var(--muted); border-bottom: 2px solid var(--muted); transform: rotate(45deg) translateY(-2px); transition: transform .25s var(--ease); flex: 0 0 auto; }
+details.manual[open] summary::after { transform: rotate(-135deg) translateY(-2px); }
+details.manual .steps { padding: 4px 14px 16px; }
 .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 10px; font-size: 14px; margin-top: 6px; }
 .kv span { color: var(--muted); }
 
