@@ -445,7 +445,7 @@ export function composeNudge(data, weekday) {
     : ending.length
     ? "A plan ends today"
     : `${overdue.length} overdue · ${money(sumP(overdue))}`;
-  return { title, body: lines.join("\n"), badge: dueToday.length + overdue.length, url: "/pay/", tag: "morning-" + today };
+  return { title, body: lines.join("\n"), badge: dueToday.length + overdue.length, url: "/pay/?needs=1", tag: "morning-" + today };
 }
 
 // Runs every hour from the Worker's cron trigger; sends once a day at the chosen hour (UK time).

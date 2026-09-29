@@ -936,7 +936,9 @@
     const week = unpaid.filter((p) => p.due_date > today && p.due_date <= addDays(today, 7));
     const overdue = unpaid.filter((p) => p.due_date < today);
     return `<section class="today-card rise" style="--i:1">
-      <div class="tc-head"><b>Today</b><span>${fmtShort(today)}</span></div>
+      <div class="tc-head"><b>Today <span>${fmtShort(today)}</span></b>${
+        needCount() ? `<button class="tc-needs" data-action="needs">${needCount()} need${needCount() === 1 ? "s" : ""} you ${ic("right")}</button>` : ""
+      }</div>
       ${
         dueToday.length
           ? `<div class="tc-list">${dueToday
@@ -956,6 +958,77 @@
         ${overdue.length ? `<button class="tc-chase" data-action="chase-list">${ic("chat")} ${overdue.length} overdue · ${money(sum(overdue))}</button>` : ""}
       </div>
     </section>`;
+  }
+
+  // ---------- "Needs you": what the notification / app badge is about ----------
+  function needsItems() {
+    const today = londonToday();
+    const unpaid = S.data.payments.filter((p) => !p.paid_date);
+    return {
+      dueToday: unpaid.filter((p) => p.due_date === today),
+      overdue: unpaid.filter((p) => p.due_date < today).sort((a, b) => (a.due_date < b.due_date ? -1 : 1)),
+      ending: decisions().filter((d) => d.p.end_date <= today),
+    };
+  }
+  // same number as the app icon badge and the morning notification's badge
+  function needCount() {
+    return actionCount();
+  }
+  function needsHtml() {
+    const today = londonToday();
+    const { dueToday, overdue, ending } = needsItems();
+    if (!dueToday.length && !overdue.length && !ending.length)
+      return `<div class="needs-clear">${ic("check")}<b>All clear</b><p>Nothing's waiting on you. If a notification brought you here, whatever it was about has been sorted since.</p></div>`;
+    const row = (p, late) => `<div class="tc-row" data-open-pay="${p.id}" role="button" tabindex="0">
+        <span class="av sm">${esc(initials(cname(p)))}</span>
+        <span class="n">${esc(cname(p))}<small>${
+          late
+            ? `Due ${fmtShort(p.due_date)} · ${plural(daysBetween(p.due_date, today), "day")} late${p.chase_count ? ` · chased ${p.chase_count}×` : " · not chased"}`
+            : `${esc(pkgText(p.package, p.programme_weeks))} · ${METH[p.method]}`
+        }</small></span>
+        <span class="a num">${money(p.amount_pence)}</span>
+        <button class="paybtn sm" data-pay="${p.id}" aria-label="Mark ${esc(cname(p))} as paid">${ic("check")}</button>
+      </div>`;
+    const part = (title, sub, body) => `<section class="needs-part"><h4>${title}<small>${sub}</small></h4><div class="tc-list">${body}</div></section>`;
+    return `
+      <p class="hint">Tick anything that's come in. It drops off here and off the app badge.</p>
+      ${dueToday.length ? part("Due today", `${plural(dueToday.length, "payment")} · ${money(sum(dueToday))}`, dueToday.map((p) => row(p, false)).join("")) : ""}
+      ${
+        overdue.length
+          ? part("Not marked paid yet", `${plural(overdue.length, "payment")} · ${money(sum(overdue))}`, overdue.map((p) => row(p, true)).join("")) +
+            `<button class="btn ghost" data-action="chase-list">${ic("chat")} Chase ${overdue.length === 1 ? "it" : "them"}</button>`
+          : ""
+      }
+      ${
+        ending.length
+          ? part(
+              "Plans ending",
+              "Decide what's next",
+              ending
+                .map(
+                  ({ c, p, ended }) => `<button class="tc-row" data-open-client="${c.id}" data-close-sheet>
+                    <span class="av sm">${esc(initials(c.name))}</span>
+                    <span class="n">${esc(c.name)}<small>${esc(planName(p))} ${ended ? `ended ${fmtShort(p.end_date)}` : "ends today"}</small></span>
+                    <span class="go">${ic("right")}</span>
+                  </button>`
+                )
+                .join("")
+            )
+          : ""
+      }`;
+  }
+  function needsSheet() {
+    const sh = openSheet("Needs you", needsHtml());
+    sh.dataset.kind = "needs";
+  }
+  function refreshNeeds() {
+    if (sheet && sheet.sh.dataset.kind === "needs") $(".sheet-body", sheet.sh).innerHTML = needsHtml();
+  }
+  // opened from the morning notification (/pay/?needs=1, or a message from the service worker)
+  function openPendingNeeds() {
+    if (!S.pendingNeeds || !S.data || S.locked || awayTooLong()) return;
+    S.pendingNeeds = false;
+    needsSheet();
   }
 
   function filteredPayments() {
@@ -1179,6 +1252,10 @@
             : ""
         }
       </div>
+      ${(() => {
+        const h = payHabit(c.id);
+        return h.n ? `<div class="habit-line rise" style="--i:5"><span class="k">Pay habit</span>${habitTag(h)}<small>${esc(h.line)}</small></div>` : "";
+      })()}
       <div class="section-head"><h2 class="sm">Plans</h2><span class="hint" style="padding:0">Tap one to fix it</span></div>
       ${
         plans.length
@@ -1209,6 +1286,74 @@
   }
 
   // ---------- Growth ----------
+  // ---------- pay habits: builds up as payments come in ----------
+  // A payment counts once it's paid, or once it's more than a day past due and still not in. Paid up to a day after the due date is on time.
+  const GRACE_DAYS = 1;
+  function payHabit(cid) {
+    const today = londonToday();
+    const ps = S.data.payments.filter(
+      (p) =>
+        (cid == null || p.client_id === cid) &&
+        p.due_date >= TRACK_START &&
+        (p.paid_date ? p.due_date <= today : daysBetween(p.due_date, today) > GRACE_DAYS)
+    );
+    let onTime = 0;
+    let lateDays = 0;
+    let lateN = 0;
+    let lateNow = 0;
+    let chases = 0;
+    for (const p of ps) {
+      chases += p.chase_count || 0;
+      if (!p.paid_date) {
+        lateNow++;
+        continue;
+      }
+      const d = daysBetween(p.due_date, p.paid_date);
+      if (d <= GRACE_DAYS) onTime++;
+      else {
+        lateN++;
+        lateDays += d;
+      }
+    }
+    const n = ps.length;
+    const rate = n ? onTime / n : 0;
+    const avgLate = lateN ? Math.round(lateDays / lateN) : 0;
+    let label, tone;
+    if (lateNow) (label = "Late now"), (tone = "bad");
+    else if (n < 2) (label = "Not enough yet"), (tone = "new");
+    else if (rate >= 0.9) (label = n >= 3 ? "Always on time" : "On time so far"), (tone = "good");
+    else if (chases / n >= 0.5) (label = "Needs chasing"), (tone = "bad");
+    else if (rate < 0.6) (label = "Often late"), (tone = "bad");
+    else (label = "Mostly on time"), (tone = "ok");
+    const bits = [`${onTime} of ${plural(n, "payment")} on time`];
+    if (avgLate) bits.push(`${plural(avgLate, "day")} late on average when late`);
+    if (lateNow) bits.push(`${lateNow} not in yet`);
+    bits.push(chases ? `chased ${chases}×` : "never chased");
+    return { n, onTime, rate, avgLate, lateN, lateNow, chases, label, tone, line: bits.join(" · ") };
+  }
+  const habitTag = (h) => `<span class="habit ${h.tone}">${h.label}</span>`;
+
+  // monthly income and paying clients at the end of each month since tracking began (today for this month)
+  function growthByMonth() {
+    const today = londonToday();
+    const out = [];
+    for (let k = mKey(TRACK_START); k <= mKey(today); k = addMonths(k, 1)) {
+      const end = k === mKey(today) ? today : addDays(addMonths(k, 1) + "-01", -1);
+      let income = 0;
+      let clients = 0;
+      for (const c of S.data.clients) {
+        if (c.finished_on && c.finished_on <= end) continue;
+        const pl = planOn(c.id, end);
+        if (!pl || pl.kind === "break") continue;
+        const v = monthlyValue(pl);
+        income += v;
+        if (v > 0) clients++;
+      }
+      out.push({ k, income, clients, now: k === mKey(today) });
+    }
+    return out;
+  }
+
   function viewGrowth() {
     const today = londonToday();
     const cur = mKey(today);
@@ -1283,6 +1428,18 @@
       .sort((a, b) => b.got - a.got)
       .slice(0, 5);
 
+    // paying on time
+    const allHabit = payHabit(null);
+    const TONE_RANK = { bad: 0, ok: 1, good: 2, new: 3 };
+    const habits = S.data.clients
+      .map((c) => ({ c, h: payHabit(c.id) }))
+      .filter((x) => x.h.n > 0)
+      .sort((a, b) => TONE_RANK[a.h.tone] - TONE_RANK[b.h.tone] || b.h.lateNow - a.h.lateNow || a.h.rate - b.h.rate || b.h.chases - a.h.chases || a.c.name.localeCompare(b.c.name));
+
+    // growth over time
+    const gm = growthByMonth();
+    const gMax = Math.max(1, ...gm.map((g) => g.income));
+
     return `
       ${topbar("Growth", settingsBtn())}
       <section class="hero rise" style="--i:0">
@@ -1336,7 +1493,7 @@
         </div>
         ${
           mixTotal
-            ? `<div class="stack" role="img" aria-label="Income split by package">${["pt", "coaching", "programme"]
+            ? `<div class="mixbar" role="img" aria-label="Income split by package">${["pt", "coaching", "programme"]
                 .filter((k) => mix[k] > 0)
                 .map((k) => `<i class="seg-${k}" style="flex-grow:${mix[k]}"></i>`)
                 .join("")}</div>
@@ -1365,6 +1522,50 @@
       </section>
 
       <section class="chart-card rise" style="--i:4">
+        <div class="cc-head"><h3>Growth over time</h3><span class="hint" style="padding:0">end of each month</span></div>
+        <div class="gm">${gm
+          .slice()
+          .reverse()
+          .map((g, i, arr) => {
+            const prev = arr[i + 1];
+            const dI = prev ? g.income - prev.income : null;
+            const dC = prev ? g.clients - prev.clients : null;
+            const sign = (v, f) => (v > 0 ? `up ${f(v)}` : v < 0 ? `down ${f(-v)}` : "no change");
+            return `<div class="gm-row">
+              <div class="gm-top"><span class="gm-m">${mLabel(g.k)}${g.now ? " <small>so far</small>" : ""}</span><b class="num">${pounds0(g.income)}<small>/mo</small></b></div>
+              <span class="gm-bar"><i style="width:${(g.income / gMax) * 100}%"></i></span>
+              <p class="gm-sub">${plural(g.clients, "paying client")}${
+                prev ? ` · ${sign(dI, (v) => pounds0(v) + "/mo")} · ${sign(dC, (v) => plural(v, "client"))} on ${mName(prev.k)}` : " · starting point"
+              }</p>
+            </div>`;
+          })
+          .join("")}</div>
+        <p class="cc-note">${gm.length < 3 ? "Adds a row every month, so the trend shows from about November. " : ""}Income here is what your plans are worth per month, same as the top of this page.</p>
+      </section>
+
+      <section class="chart-card rise" style="--i:5">
+        <div class="cc-head"><h3>Paying on time</h3>${allHabit.n ? `<span class="hint" style="padding:0">since ${fmtShort(TRACK_START)}</span>` : ""}</div>
+        ${
+          allHabit.n
+            ? `<div class="rate-hero"><b class="num">${Math.round(allHabit.rate * 100)}%</b><span>on time · ${allHabit.onTime} of ${plural(allHabit.n, "payment")}</span></div>
+               <div class="kpi-lines">
+                 <p><span>Late on average, when late</span><b class="num">${allHabit.lateN ? plural(allHabit.avgLate, "day") : "—"}</b></p>
+                 <p><span>Not in yet</span><b class="num">${allHabit.lateNow}</b></p>
+                 <p><span>Times you've had to chase</span><b class="num">${allHabit.chases}</b></p>
+               </div>
+               <div class="habits">${habits
+                 .map(
+                   ({ c, h }) => `<button class="habit-row" data-open-client="${c.id}"><span class="n">${esc(c.name)}<small>${esc(h.line)}</small></span>${habitTag(h)}</button>`
+                 )
+                 .join("")}</div>`
+            : ""
+        }
+        <p class="cc-note">${
+          allHabit.n ? "Worst first. " : "Nothing's been due long enough to judge yet. "
+        }Counts every payment since tracking began. Up to a day late counts as on time. The more months go by, the clearer the pattern.</p>
+      </section>
+
+      <section class="chart-card rise" style="--i:6">
         <div class="cc-head"><h3>What you earn per hour</h3></div>
         ${
           rates.length
@@ -1379,7 +1580,7 @@
         }
       </section>
 
-      <section class="chart-card rise" style="--i:5">
+      <section class="chart-card rise" style="--i:7">
         <div class="cc-head"><h3>Most money in</h3><span class="hint" style="padding:0">since tracking began</span></div>
         ${
           ltv.length
@@ -1447,7 +1648,7 @@
           s.hasPasskey
             ? `<div class="row"><span class="ic">${ic("faceid")}</span><span class="l">Face ID is on<small>Works on any device using your iCloud Keychain</small></span></div>
                <label class="row stack"><span class="ic">${ic("lock")}</span><span class="l">Ask for Face ID<small>Only when you come back to the app, never while you're using it</small></span>
-                 <select class="pick" id="lockSel" style="flex:1 1 100%;margin-top:6px;height:42px">${LOCKS.map(
+                 <select class="pick" id="lockSel" style="flex:1 1 100%;margin-top:6px">${LOCKS.map(
                    ([v, l]) => `<option value="${v}" ${Number(s.lockMinutes) === v ? "selected" : ""}>${l}</option>`
                  ).join("")}</select></label>
                <button class="row danger" data-action="faceid-remove"><span class="l">Turn off Face ID</span></button>`
@@ -1579,7 +1780,10 @@
     S.heroAnim = "";
     if (!mode) window.scrollTo(0, y);
   }
-  const rerender = () => render();
+  const rerender = () => {
+    render();
+    refreshNeeds();
+  };
 
   // ---------- sheets: payments ----------
   function clientOptions(sel) {
@@ -2764,6 +2968,8 @@
           }
           case "chase-list":
             return chaseSheet();
+          case "needs":
+            return needsSheet();
           case "template":
             return templateSheet();
           case "goal":
@@ -3093,6 +3299,8 @@
       S.session = s;
       setData(await api("/data"));
       if (!sheet) rerender();
+      else refreshNeeds();
+      openPendingNeeds();
     } catch {}
   });
   window.addEventListener("pagehide", markHidden);
@@ -3126,12 +3334,27 @@
       root().innerHTML = "";
       render("fade");
       checkPushHere();
+      openPendingNeeds();
     } catch (e) {
       if (e.silent) return;
       root().innerHTML = `<div class="lock-screen"><div class="coin-logo big">£</div><h1>Can't connect</h1><p>${esc(e.message)}</p><button class="btn lime" id="retry">Try again</button></div>`;
       $("#retry").onclick = boot;
     }
   }
+
+  try {
+    if (new URLSearchParams(location.search).has("needs")) {
+      S.pendingNeeds = true;
+      history.replaceState(null, "", location.pathname);
+    }
+  } catch {}
+  if ("serviceWorker" in navigator)
+    navigator.serviceWorker.addEventListener("message", (e) => {
+      if (e.data?.type !== "needs") return;
+      S.pendingNeeds = true;
+      // if the app is about to lock, it opens straight after Face ID instead
+      setTimeout(openPendingNeeds, 300);
+    });
 
   (async () => {
     applyTheme(pref("theme", "system"));

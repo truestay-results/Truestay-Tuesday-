@@ -19,6 +19,8 @@ Private client payment and revenue tracker. Phone-first web app: add it to your 
 - Data: Cloudflare D1 database `truestay-pay` (binding `PAY_DB`), schema in `migrations/`
 - Plans: each client has a timeline of plans (PT / coaching / programme / break, paid monthly, upfront, split or as they go). Plans create their own payments; switching or ending a plan only removes its unpaid, not-yet-due payments
 - Morning nudge: hourly cron (`triggers.crons` in `wrangler.jsonc`) sends one Web Push a day at the chosen UK hour; VAPID keys live in `pay_meta`
+- Tapping the nudge opens `/pay/?needs=1` (or, if the app is already open, `sw.js` posts `{type:"needs"}`), which shows the "Needs you" sheet: due today, not marked paid, plans ending. The Today card's "N need you" chip is the same count as the app badge.
+- Growth tab also has "Growth over time" (plan income and paying clients at each month end) and "Paying on time" (per client, since tracking began; up to a day late counts as on time). Both build up month by month.
 - Sign-in: email and password once per device (sessions last a year), optional Face ID via passkeys
 - Money stored in pence; tracking starts 28 September 2026
 - Look, colours, sizes and the tap-area rules: see [`DESIGN.md`](DESIGN.md). Read it before changing how `/pay` looks

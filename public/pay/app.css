@@ -729,10 +729,23 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 
 /* today glance */
 .today-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-lg); padding: 14px 14px 12px; margin-bottom: 14px; }
-.tc-head { display: flex; justify-content: space-between; align-items: baseline; padding: 0 2px 8px; }
+.tc-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 0 2px 8px; min-height: 32px; }
 .tc-head b { font-size: 17px; font-weight: 600; }
-.tc-head span { color: var(--muted); font-size: 14px; }
-.tc-list { display: grid; gap: 6px; }
+.tc-head b span { color: var(--muted); font-size: 14px; font-weight: 400; margin-left: 6px; }
+.tc-needs { display: inline-flex; align-items: center; gap: 4px; padding: 6px 10px 6px 12px; border-radius: 999px; background: var(--ink); color: var(--bg); font-weight: 600; font-size: 13px; white-space: nowrap; }
+.tc-needs svg { width: 14px; height: 14px; }
+button.tc-row { width: 100%; text-align: left; font: inherit; color: inherit; border: 0; }
+.tc-row .go { color: var(--muted); display: grid; place-items: center; width: 24px; }
+.tc-row .go svg { width: 16px; height: 16px; }
+.needs-part { margin: 14px 0 10px; }
+.needs-part .tc-row .n small { white-space: normal; }
+.needs-part h4 { font-size: 15px; font-weight: 600; margin: 0 4px 8px; display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.needs-part h4 small { font-size: 13px; font-weight: 400; color: var(--muted); }
+.needs-clear { text-align: center; padding: 24px 12px 12px; display: grid; justify-items: center; gap: 6px; }
+.needs-clear svg { width: 34px; height: 34px; color: var(--green); padding: 8px; border-radius: 50%; background: var(--surface-2); box-sizing: content-box; }
+.needs-clear b { font-size: 18px; font-weight: 600; }
+.needs-clear p { color: var(--muted); font-size: 14px; max-width: 30ch; }
+.tc-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 6px; }
 .tc-row { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 14px; background: var(--surface-2); cursor: pointer; }
 .tc-row .n { flex: 1; min-width: 0; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .tc-row .n small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; }
@@ -883,12 +896,12 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 .mini-table td { padding: 6px 4px; border-bottom: 1px solid rgba(255,255,255,.06); }
 .mini-table .n { text-align: right; }
 
-.stack { display: flex; height: 18px; gap: 2px; margin: 14px 0 12px; }
-.stack i { border-radius: 2px; min-width: 6px; transform-origin: left; }
-.stack i:first-child { border-radius: 6px 2px 2px 6px; }
-.stack i:last-child { border-radius: 2px 6px 6px 2px; }
-.stack i:only-child { border-radius: 6px; }
-.enter .stack i { animation: growX .8s var(--spring) both .25s; }
+.mixbar { display: flex; height: 18px; gap: 2px; margin: 14px 0 12px; }
+.mixbar i { border-radius: 2px; min-width: 6px; transform-origin: left; }
+.mixbar i:first-child { border-radius: 6px 2px 2px 6px; }
+.mixbar i:last-child { border-radius: 2px 6px 6px 2px; }
+.mixbar i:only-child { border-radius: 6px; }
+.enter .mixbar i { animation: growX .8s var(--spring) both .25s; }
 @keyframes growX { from { transform: scaleX(0); } to { transform: scaleX(1); } }
 .seg-pt { background: var(--mix-pt); }
 .seg-coaching { background: var(--mix-coaching); }
@@ -945,9 +958,9 @@ button.tile:disabled:active { transform: none; }
 /* ===================== v4: Apple HIG pass ===================== */
 /* Tap targets. Apple asks for 44 x 44. Small controls keep their look and get an invisible 44px target:
    the inset only goes negative when the control is smaller than 44 on that axis. */
-.round, .back, .paybtn, .seg button, .linkish, .edit-goal, .tc-chase, .auth-alt button, .lock-screen .pw,
+.round, .back, .paybtn, .seg button, .linkish, .edit-goal, .tc-chase, .tc-needs, .auth-alt button, .lock-screen .pw,
 .x, .mini, .stepper button, .toast-inner button, .switch { position: relative; }
-.round::after, .back::after, .paybtn::after, .seg button::after, .linkish::after, .edit-goal::after, .tc-chase::after,
+.round::after, .back::after, .paybtn::after, .seg button::after, .linkish::after, .edit-goal::after, .tc-chase::after, .tc-needs::after,
 .auth-alt button::after, .lock-screen .pw::after, .x::after, .mini::after, .stepper button::after,
 .toast-inner button::after, .switch::after {
   content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2));
@@ -962,3 +975,29 @@ button.tile:disabled:active { transform: none; }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .search input:focus-visible, .field input:focus-visible, .field select:focus-visible, .field textarea:focus-visible { outline: 0; }
 .search:focus-within { border-color: var(--ink); }
+
+/* ===================== v5: pay habits, growth over time ===================== */
+/* Status always has words on it; colour only backs it up. */
+.habit { display: inline-flex; align-items: center; padding: 3px 9px; border-radius: 999px; font-size: 12px; font-weight: 600; white-space: nowrap; flex: none; background: var(--surface-2); color: var(--ink-2); }
+.habit.good { background: var(--green-soft); color: var(--green-ink); }
+.habit.ok { background: var(--amber-soft); color: var(--amber-ink); }
+.habit.bad { background: var(--red-soft); color: var(--red-ink); }
+.habits { margin-top: 10px; }
+.habit-row { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 52px; padding: 10px 4px; text-align: left; border-bottom: 1px solid var(--line); }
+.habit-row:last-child { border-bottom: 0; }
+.habit-row .n { flex: 1; min-width: 0; font-weight: 600; }
+.habit-row .n small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.habit-line { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; margin: 12px 0 4px; }
+.habit-line .k { font-weight: 600; font-size: 14px; }
+.habit-line small { flex-basis: 100%; color: var(--muted); font-size: 13px; }
+.gm { display: grid; gap: 4px; }
+.gm-row { padding: 8px 2px 10px; border-bottom: 1px solid var(--line); }
+.gm-row:last-child { border-bottom: 0; }
+.gm-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.gm-m { font-weight: 600; font-size: 15px; }
+.gm-m small { font-weight: 400; color: var(--muted); font-size: 12px; }
+.gm-top b { font-weight: 600; font-size: 17px; }
+.gm-top b small { font-size: 12px; color: var(--muted); font-weight: 400; }
+.gm-bar { display: block; height: 6px; border-radius: 999px; background: var(--surface-2); margin: 8px 0 6px; overflow: hidden; }
+.gm-bar i { display: block; height: 100%; border-radius: inherit; background: var(--ink); }
+.gm-sub { font-size: 13px; color: var(--muted); }

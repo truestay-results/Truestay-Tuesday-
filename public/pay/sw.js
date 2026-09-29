@@ -1,8 +1,8 @@
 // TrueStay Pay service worker
 //  - keeps the app shell available for a fast, app-like start (network first, cached copy if offline; never touches /api)
 //  - shows the morning nudge and keeps the app-icon badge up to date
-const CACHE = "ts-pay-v4";
-const SHELL = ["./", "app.css?v=4", "app.js?v=4", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png"];
+const CACHE = "ts-pay-v5";
+const SHELL = ["./", "app.css?v=5", "app.js?v=5", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
@@ -59,7 +59,12 @@ self.addEventListener("notificationclick", (e) => {
   const url = new URL((e.notification.data && e.notification.data.url) || "./", self.registration.scope).href;
   e.waitUntil(
     self.clients.matchAll({ type: "window", includeUncontrolled: true }).then((wins) => {
-      for (const w of wins) if (w.url.startsWith(self.registration.scope) && "focus" in w) return w.focus();
+      // App already open: bring it forward and tell it to show what the notification was about
+      for (const w of wins)
+        if (w.url.startsWith(self.registration.scope) && "focus" in w) {
+          if (url.includes("needs=")) w.postMessage({ type: "needs" });
+          return w.focus();
+        }
       return self.clients.openWindow(url);
     })
   );
