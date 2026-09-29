@@ -16,6 +16,9 @@
 //  - The hourly cron reads anything missed and deletes pictures 14 days after they went in a PDF (90 days max).
 
 import { HttpError, bad, nowS, text, isDate } from "./pay-util.js";
+import { READER_V, SYSTEM, PROMPT, VERIFY, cleanReading, checkReading, applyVerify, flatFields, compactReading } from "./logs-read.js";
+
+export { cleanReading, dateFromShown } from "./logs-read.js";
 
 const PART = 1_000_000; // base64 characters per stored part (D1 rows max out at 2 MB)
 const MAX_BYTES = 10 * 1024 * 1024; // app uploads (already resized on the phone)
@@ -117,7 +120,23 @@ export async function ensureLogsSchema(db) {
     db.prepare(
       "CREATE TABLE IF NOT EXISTS logs_targets (client_id INTEGER PRIMARY KEY, kcal INTEGER, protein INTEGER, steps INTEGER, updated_at INTEGER NOT NULL)"
     ),
+    // your call on a day the checks weren't sure about: 'count' it in the averages, or 'omit' it
+    db.prepare(
+      "CREATE TABLE IF NOT EXISTS logs_days (client_id INTEGER NOT NULL, day TEXT NOT NULL, verdict TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (client_id, day))"
+    ),
   ]);
+  // added later: which reader version read it (old ones get read again), and, for numbers you typed,
+  // whether they're the whole day's or one meal's
+  for (const sql of [
+    "ALTER TABLE logs_items ADD COLUMN rv INTEGER NOT NULL DEFAULT 1",
+    "ALTER TABLE logs_items ADD COLUMN scope TEXT",
+  ]) {
+    try {
+      await db.prepare(sql).run();
+    } catch (e) {
+      if (!/duplicate column/i.test(String(e && e.message))) console.error("logs schema", e && e.message);
+    }
+  }
   schemaReady = true;
 }
 
@@ -289,28 +308,7 @@ async function loadB64(db, id) {
 }
 
 // ---------- reading ----------
-const SYSTEM = `You read screenshots that a personal trainer's clients send him each night: food diaries (MyFitnessPal, Nutracheck, MacroFactor, Cronometer, Lose It, Carb Manager, Samsung Health and others) and step or activity screens (Apple Health, Apple Fitness, Google Fit, Samsung Health, Fitbit, Garmin, Strava, pedometer apps).
-Read only what is actually on the screen. Never guess, estimate or add up numbers that are not shown as a total. Reply with one JSON object and nothing else.`;
-
-const PROMPT = `Read this screenshot and fill in this JSON. Use null for anything that is not on the screen.
-{
-  "kind": "food" | "steps" | "food_steps" | "weight" | "other",
-  "app": "name of the app if you can tell, else null",
-  "date_shown": "the date label exactly as written on the screen, e.g. Today, Yesterday, Mon 21 Sep, 21/09/2026. Not the status bar clock. null if none",
-  "date": "that date as YYYY-MM-DD if a year is printed, MM-DD if only day and month are printed, null for Today/Yesterday/weekday-only labels",
-  "clock": "the time in the phone status bar at the very top, HH:MM 24 hour, or null",
-  "calories": "total calories EATEN that day (the food total). Not the goal, not calories remaining, not calories burned",
-  "calorie_goal": "the daily calorie goal or budget if shown",
-  "protein_g": "the day's total protein in grams if shown (not a single meal, not a goal)",
-  "carbs_g": "the day's total carbohydrate in grams if shown",
-  "fat_g": "the day's total fat in grams if shown",
-  "steps": "the day's step count if shown",
-  "exercise_kcal": "calories burned by exercise or activity if shown",
-  "extras": [{"label": "Water", "value": "2.1 L"}],
-  "note": "empty string, unless something on the screen stands out for a coach, e.g. a meal section that's empty or a warning from the app. Don't mention parts that are just off the screen"
-}
-For extras give up to 4 other daily numbers worth a coach seeing, such as water, body weight, fibre, sugar, distance or sleep. Numbers as plain numbers without units, except inside extras values.`;
-
+// What the model is asked, and the checks on its answer, are in logs-read.js.
 function textOf(res) {
   if (res == null) return "";
   if (typeof res === "string") return res;
@@ -336,132 +334,69 @@ export function parseJSONish(s) {
   }
 }
 
-async function askModel(env, model, dataUrl, withExtra) {
+// Workers AI's free allowance runs out for the day (it resets at 00:00 UTC): nothing is wrong with the picture
+export class AiLimitError extends Error {}
+const isLimit = (msg) => /\b4006\b|daily free allocation|neurons|quota/i.test(String(msg || ""));
+
+async function askModel(env, model, dataUrl, withExtra, { system, prompt, maxTokens }) {
   const input = {
     messages: [
-      { role: "system", content: SYSTEM },
+      { role: "system", content: system },
       {
         role: "user",
         content: [
-          { type: "text", text: PROMPT },
+          { type: "text", text: prompt },
           { type: "image_url", image_url: { url: dataUrl } },
         ],
       },
     ],
-    max_tokens: 900,
+    max_tokens: maxTokens,
     temperature: 0,
     ...(withExtra ? model.extra : {}),
   };
   return env.AI.run(model.id, input);
 }
 
-export async function askModels(env, dataUrl, models = MODELS) {
+export async function askModels(env, dataUrl, opts = {}, models = MODELS) {
+  const o = { system: SYSTEM, prompt: PROMPT, maxTokens: 1600, ...opts };
   const errors = [];
   for (const m of models) {
     for (const withExtra of Object.keys(m.extra || {}).length ? [true, false] : [false]) {
       try {
-        const res = await askModel(env, m, dataUrl, withExtra);
+        const res = await askModel(env, m, dataUrl, withExtra, o);
         const obj = parseJSONish(textOf(res));
-        if (obj) return { reading: obj, model: m.id, raw: textOf(res).slice(0, 3000) };
+        if (obj) return { reading: obj, model: m.id, raw: textOf(res).slice(0, 6000) };
         errors.push(`${m.id}: no JSON`);
         break; // it answered, just badly: try the next model
       } catch (e) {
-        errors.push(`${m.id}${withExtra ? "+" : ""}: ${String((e && e.message) || e).slice(0, 160)}`);
+        const msg = String((e && e.message) || e);
+        if (isLimit(msg)) throw new AiLimitError(msg.slice(0, 200));
+        errors.push(`${m.id}${withExtra ? "+" : ""}: ${msg.slice(0, 160)}`);
       }
     }
   }
   throw new Error(errors.join(" | ") || "No model answered");
 }
 
-const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
-const two = (n) => String(n).padStart(2, "0");
-function mkDate(y, mo, d) {
-  mo = +mo;
-  d = +d;
-  if (!(mo >= 1 && mo <= 12 && d >= 1 && d <= 31)) return null;
-  if (y) {
-    const iso = `${String(y).length === 2 ? "20" + y : y}-${two(mo)}-${two(d)}`;
-    return isDate(iso) ? iso : null;
-  }
-  return isDate(`2024-${two(mo)}-${two(d)}`) ? `${two(mo)}-${two(d)}` : null; // 2024 allows 29 Feb
-}
-// "Mon 21 Sep", "21st September 2026", "Sep 21", "21/09/2026", "21/09" (UK order). Returns YYYY-MM-DD or MM-DD.
-export function dateFromShown(label) {
-  if (!label) return null;
-  const t = String(label).toLowerCase();
-  const mon = "(jan|feb|mar|apr|may|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\\.?";
-  let m = t.match(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+${mon}(?:,?\\s+(\\d{4}))?`));
-  if (m) return mkDate(m[3], MONTHS[m[2]], m[1]);
-  m = t.match(new RegExp(`\\b${mon}\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b(?:,?\\s+(\\d{4}))?`));
-  if (m) return mkDate(m[3], MONTHS[m[1]], m[2]);
-  m = t.match(/\b(\d{1,2})[/.](\d{1,2})(?:[/.](\d{4}|\d{2}))?\b/);
-  if (m) return mkDate(m[3], m[2], m[1]);
-  return null;
-}
-function cleanDate(v) {
-  if (typeof v !== "string") return null;
-  let m = v.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (m) return mkDate(m[1], m[2], m[3]);
-  m = v.trim().match(/^(\d{2})-(\d{2})$/);
-  return m ? mkDate(null, m[1], m[2]) : null;
-}
-
-const toNum = (v, min, max, dp = 0) => {
-  if (v === null || v === undefined || v === "" || typeof v === "boolean") return null;
-  const n = typeof v === "number" ? v : Number(String(v).replace(/[,\s]|kcal|cal|g$/gi, ""));
-  if (!Number.isFinite(n) || n < min || n > max) return null;
-  const f = 10 ** dp;
-  return Math.round(n * f) / f;
-};
-const fmtKcal = (n) => `${Math.round(n).toLocaleString("en-GB")} kcal`;
-
-export function cleanReading(o) {
-  o = o && typeof o === "object" ? o : {};
-  let kind = String(o.kind || "").toLowerCase().replace(/[^a-z_]/g, "");
-  if (kind === "foodsteps" || kind === "food_and_steps" || kind === "both") kind = "food_steps";
-  if (!KINDS.includes(kind)) kind = "other";
-  const s = (v, max) => (typeof v === "string" && v.trim() && !/^null$/i.test(v.trim()) ? v.trim().slice(0, max) : null);
-  // a day and month read from the label on screen beats the model's own conversion (it can swap day and month)
-  const date = dateFromShown(s(o.date_shown, 40)) || cleanDate(o.date);
-  let clock = s(o.clock, 8);
-  if (clock) {
-    const m = clock.match(/^(\d{1,2})[:.](\d{2})/);
-    clock = m && +m[1] < 24 && +m[2] < 60 ? `${m[1].padStart(2, "0")}:${m[2]}` : null;
-  }
-  const extras = [];
-  if (Array.isArray(o.extras)) {
-    for (const e of o.extras.slice(0, 6)) {
-      const label = s(e && e.label, 24);
-      const value = s(e && e.value != null ? String(e.value) : null, 24);
-      if (label && value && !extras.some((x) => x.label.toLowerCase() === label.toLowerCase())) extras.push({ label, value });
+// Read one picture: the first look, then a focused second look if the numbers don't add up.
+export async function readPicture(env, dataUrl) {
+  const first = await askModels(env, dataUrl);
+  let r = cleanReading(first.reading);
+  const issues = checkReading(r);
+  if (issues.length) {
+    try {
+      const again = await askModels(env, dataUrl, { system: SYSTEM, prompt: VERIFY, maxTokens: 700 });
+      r = applyVerify(r, again.reading, issues);
+    } catch (e) {
+      if (e instanceof AiLimitError) throw e;
+      r.checked = { asked: issues.map((i) => i.issue), still: issues.map((i) => i.issue), failed: true };
+      r.unsure = [...new Set(issues.map((i) => i.field))];
     }
   }
-  const ex = toNum(o.exercise_kcal, 1, 6000);
-  if (ex != null && !extras.some((x) => /kcal|cal\b/i.test(x.value))) extras.unshift({ label: "Burned", value: fmtKcal(ex) });
-  const r = {
-    kind,
-    app: s(o.app, 40),
-    date_shown: s(o.date_shown, 40),
-    date,
-    clock,
-    calories: toNum(o.calories, 0, 12000),
-    calorie_goal: toNum(o.calorie_goal, 500, 8000),
-    protein_g: toNum(o.protein_g, 0, 700, 1),
-    carbs_g: toNum(o.carbs_g, 0, 1500, 1),
-    fat_g: toNum(o.fat_g, 0, 600, 1),
-    steps: toNum(o.steps, 0, 150000),
-    extras: extras.slice(0, 4),
-    partial: false,
-    note: s(o.note, 160) || "",
-  };
-  // a steps screen with no food numbers shouldn't claim food, and vice versa
-  const hasFood = [r.calories, r.protein_g, r.carbs_g, r.fat_g].some((v) => v != null);
-  if (r.kind === "food_steps" && !hasFood) r.kind = r.steps != null ? "steps" : "other";
-  if (r.kind === "food_steps" && r.steps == null) r.kind = "food";
-  if (r.kind === "steps" && hasFood && r.steps != null) r.kind = "food_steps";
-  r.partial = (r.kind === "food" || r.kind === "food_steps") && r.calories == null;
-  return r;
+  return { r, model: first.model, raw: first.raw };
 }
+
+const LIMIT_NOTE = "Paused: today's free reading allowance is used up. It carries on after 1am.";
 
 export async function readItem(env, id) {
   const db = env.LOGS_DB;
@@ -469,37 +404,46 @@ export async function readItem(env, id) {
   if (!it || it.status === "uploading" || it.status === "dup") return it ? itemById(db, id) : null;
   const now = nowS();
   if (!env.AI) {
-    await db.prepare("UPDATE logs_items SET status='failed', read_error=?, updated_at=? WHERE id=?").bind("Reading isn't switched on", now, id).run();
+    if (it.status !== "read") await db.prepare("UPDATE logs_items SET status='failed', read_error=?, updated_at=? WHERE id=?").bind("Reading isn't switched on", now, id).run();
     return itemById(db, id);
   }
+  // counted before reading, so a picture that somehow always breaks the reader isn't retried for ever
   await db.prepare("UPDATE logs_items SET read_tries = read_tries + 1 WHERE id = ?").bind(id).run();
   let out = null;
   let err = null;
   try {
-    out = await askModels(env, `data:${it.mime};base64,${await loadB64(db, id)}`);
+    out = await readPicture(env, `data:${it.mime};base64,${await loadB64(db, id)}`);
   } catch (e) {
+    if (e instanceof AiLimitError) {
+      // not the picture's fault: keep whatever was read before, don't count the try, carry on tomorrow
+      await db.prepare("UPDATE logs_items SET read_tries = MAX(0, read_tries - 1), read_error=?, updated_at=? WHERE id=?").bind(LIMIT_NOTE, nowS(), id).run();
+      return itemById(db, id);
+    }
     err = String((e && e.message) || e).slice(0, 300);
     console.error("logs read failed", id, err);
   }
   const t = nowS();
   if (!out) {
-    await db.prepare("UPDATE logs_items SET status='failed', read_error=?, updated_at=? WHERE id=?").bind(err || "Couldn't read it", t, id).run();
+    // a screenshot that was read before keeps its numbers if a re-read fails
+    if (it.status === "read") await db.prepare("UPDATE logs_items SET read_error=?, updated_at=? WHERE id=?").bind(err || "Couldn't read it again", t, id).run();
+    else await db.prepare("UPDATE logs_items SET status='failed', read_error=?, updated_at=? WHERE id=?").bind(err || "Couldn't read it", t, id).run();
     return itemById(db, id);
   }
-  const r = cleanReading(out.reading);
-  const reading = JSON.stringify({ date_shown: r.date_shown, date: r.date, clock: r.clock, model: out.model });
-  // "AND edited = 0": if you typed numbers while it was reading, yours win
+  const r = out.r;
+  const f = flatFields(r);
+  const reading = compactReading(r, out.model);
+  // "AND edited = 0": if you typed numbers yourself, yours win (the new reading is still kept for the day's checks)
   const res = await db
     .prepare(
-      `UPDATE logs_items SET status='read', read_at=?, read_error=NULL, reading=?, kind=?, app=?, kcal=?, protein=?, carbs=?, fat=?, steps=?,
+      `UPDATE logs_items SET status='read', read_at=?, read_error=NULL, reading=?, rv=?, kind=?, app=?, kcal=?, protein=?, carbs=?, fat=?, steps=?,
          kcal_goal=?, partial=?, extras=?, note=?, updated_at=? WHERE id=? AND edited = 0`
     )
-    .bind(t, reading, r.kind, r.app, r.calories, r.protein_g, r.carbs_g, r.fat_g, r.steps, r.calorie_goal, r.partial ? 1 : 0, JSON.stringify(r.extras), r.note, t, id)
+    .bind(t, reading, READER_V, f.kind, f.app, f.kcal, f.protein, f.carbs, f.fat, f.steps, f.kcal_goal, f.partial, JSON.stringify(f.extras), f.note, t, id)
     .run();
   if (!res.meta || !res.meta.changes) {
-    await db.prepare("UPDATE logs_items SET status='read', read_at=?, read_error=NULL, reading=?, updated_at=? WHERE id=?").bind(t, reading, t, id).run();
+    await db.prepare("UPDATE logs_items SET status='read', read_at=?, read_error=NULL, reading=?, rv=?, updated_at=? WHERE id=?").bind(t, reading, READER_V, t, id).run();
   } else {
-    await markIfRepeat(db, id, r);
+    await markIfRepeat(db, id, { clock: r.clock, calories: f.kcal, steps: f.steps, protein_g: f.protein });
   }
   return itemById(db, id);
 }
@@ -548,7 +492,10 @@ const pub = (r) => ({
   status: r.status,
   read_error: r.read_error,
   read_tries: r.read_tries,
-  r: safeJSON(r.reading, null),
+  r: oldR(r.reading), // TEMPORARY: what app versions before reader 2 expect; goes once the new app is out
+  rj: r.reading || null, // parsed in the app (keeps the Worker's CPU down)
+  rv: r.rv || 1,
+  scope: r.scope || null,
   day: r.day,
   day_src: r.day_src,
   kind: r.kind,
@@ -566,6 +513,10 @@ const pub = (r) => ({
   filed_at: r.filed_at,
   v: String(r.sha || "").slice(0, 12),
 });
+function oldR(reading) {
+  const o = safeJSON(reading, null);
+  return o ? { date_shown: o.date_shown || null, date: o.date || null, clock: o.clock || null } : null;
+}
 async function itemById(db, id) {
   const r = await db.prepare("SELECT * FROM logs_items WHERE id = ?").bind(id).first();
   return r ? pub(r) : null;
@@ -583,19 +534,24 @@ function newKey() {
 async function getState(env) {
   const db = env.LOGS_DB;
   const cutoff = nowS() - KEEP_FILED_DAYS * 86400;
-  const [items, targets, usage, key, clients] = await Promise.all([
+  const [items, targets, usage, key, clients, verdicts] = await Promise.all([
     db.prepare("SELECT * FROM logs_items WHERE status NOT IN ('uploading','dup') AND (filed_at IS NULL OR filed_at > ?) ORDER BY received_at, id").bind(cutoff).all(),
     db.prepare("SELECT * FROM logs_targets").all(),
     db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(bytes),0) AS bytes FROM logs_items WHERE status != 'dup'").first(),
     getKey(db),
     clientsFromPay(env),
+    db.prepare("SELECT client_id, day, verdict FROM logs_days").all(),
   ]);
   const t = {};
   for (const r of targets.results) t[r.client_id] = { kcal: r.kcal, protein: r.protein, steps: r.steps };
+  const days = {};
+  for (const r of verdicts.results) (days[r.client_id] = days[r.client_id] || {})[r.day] = r.verdict;
   return {
     clients,
     items: items.results.map(pub),
     targets: t,
+    days,
+    reader: READER_V,
     key,
     usage: { count: usage.n, bytes: usage.bytes, stored: Math.round(usage.bytes * 1.34), limit: DB_LIMIT },
     keep: { filedDays: KEEP_FILED_DAYS, anyDays: KEEP_ANY_DAYS },
@@ -714,6 +670,10 @@ export async function handleLogsApp(req, env, url, path, ctx) {
       set("kind", b.kind);
       edited = true;
     }
+    if ("scope" in b) {
+      if (b.scope !== null && b.scope !== "day" && b.scope !== "meal") bad("Pick whole day or one meal");
+      set("scope", b.scope);
+    }
     if ("note" in b) set("note", text(b.note, 300));
     if (edited) set("edited", 1);
     if (!sets.length) bad("Nothing to change");
@@ -751,6 +711,26 @@ export async function handleLogsApp(req, env, url, path, ctx) {
       }
     }
     await db.batch(stmts);
+    return json({ ok: true, state: await getState(env) });
+  }
+
+  if (path === "/days" && method === "POST") {
+    const b = await body();
+    const c = await clientRef(env, b.client_id);
+    if (!c.id) bad("Pick a client");
+    if (!isDay(b.day)) bad("Pick a day");
+    if (b.verdict === null || b.verdict === "") {
+      await db.prepare("DELETE FROM logs_days WHERE client_id = ? AND day = ?").bind(c.id, b.day).run();
+    } else {
+      if (b.verdict !== "count" && b.verdict !== "omit") bad("Count it or leave it out");
+      await db
+        .prepare(
+          `INSERT INTO logs_days (client_id, day, verdict, updated_at) VALUES (?,?,?,?)
+           ON CONFLICT(client_id, day) DO UPDATE SET verdict=excluded.verdict, updated_at=excluded.updated_at`
+        )
+        .bind(c.id, b.day, b.verdict, nowS())
+        .run();
+    }
     return json({ ok: true, state: await getState(env) });
   }
 
@@ -873,7 +853,7 @@ export async function handleLogsShare(req, env, url, ctx) {
 }
 
 // ---------- hourly tidy-up ----------
-export async function logsCron(env) {
+export async function logsCron(env, ctx) {
   const db = env.LOGS_DB;
   if (!db) return;
   await ensureLogsSchema(db);
@@ -895,15 +875,103 @@ export async function logsCron(env) {
     ]);
   }
   if (!env.AI) return;
+  // anything not read yet, then anything read by an older version of the reader (newest first, so this week's are fixed first)
   const todo = await db
-    .prepare("SELECT id FROM logs_items WHERE status IN ('new','failed') AND read_tries < 3 AND received_at < ? AND filed_at IS NULL ORDER BY received_at LIMIT 8")
-    .bind(now - 300)
+    .prepare(
+      `SELECT id FROM logs_items WHERE filed_at IS NULL AND received_at < ? AND (
+         (status IN ('new','failed') AND read_tries < 3) OR (? AND status = 'read' AND rv < ? AND read_tries < 6))
+       ORDER BY CASE WHEN status = 'read' THEN 1 ELSE 0 END, received_at DESC LIMIT ?`
+    )
+    .bind(now - 300, REREAD_OLD ? 1 : 0, READER_V, CRON_READS)
     .all();
-  for (const r of todo.results) {
-    try {
-      await readItem(env, r.id);
-    } catch (e) {
-      console.error("logs cron read", r.id, e && e.message);
+  await readMany(env, ctx, todo.results.map((r) => r.id));
+}
+
+const CRON_READS = 20;
+const REREAD_OLD = false; // switched on once the new reader has been checked against real screenshots
+// Each read runs as its own invocation (ctx.exports.Reader, a loopback to this Worker) so one hourly run can
+// read 20 pictures without going over the per-invocation CPU limit. Stops early if the day's AI allowance runs out.
+export async function readMany(env, ctx, ids, conc = 4) {
+  const reader = ctx && ctx.exports && ctx.exports.Reader;
+  const out = { read: 0, failed: 0, limit: false, loopback: !!reader };
+  for (let i = 0; i < ids.length && !out.limit; i += conc) {
+    const chunk = ids.slice(i, i + conc);
+    const results = await Promise.all(
+      chunk.map(async (id) => {
+        try {
+          if (reader) {
+            const res = await reader.fetch(new Request(`https://reader.internal/read/${id}`, { method: "POST" }));
+            return await res.json();
+          }
+          const it = await readItem(env, id);
+          return { ok: true, status: it && it.status, error: it && it.read_error };
+        } catch (e) {
+          return { ok: false, error: String((e && e.message) || e).slice(0, 200) };
+        }
+      })
+    );
+    for (const r of results) {
+      if (r && r.error === LIMIT_NOTE) out.limit = true;
+      else if (r && r.ok && r.status === "read") out.read++;
+      else out.failed++;
     }
   }
+  return out;
+}
+
+// The loopback entrypoint behind readMany (exported from index.js as Reader).
+export async function readerFetch(req, env) {
+  const m = new URL(req.url).pathname.match(/^\/read\/(\d+)$/);
+  if (!m || req.method !== "POST") return json({ ok: false, error: "Not found" }, 404);
+  try {
+    await ensureLogsSchema(env.LOGS_DB);
+    const it = await readItem(env, Number(m[1]));
+    return json({ ok: true, status: it && it.status, error: it && it.read_error });
+  } catch (e) {
+    return json({ ok: false, error: String((e && e.message) || e).slice(0, 200) });
+  }
+}
+
+
+// ---------- TEMPORARY: checking the new reader against real screenshots (removed once verified) ----------
+// /api/logs/dev/<token>/trial/<id>: read one picture with the current reader and keep the full answer in
+//   logs_meta ('trial:<id>') without changing the screenshot.
+// /api/logs/dev/<token>/reread/<client id>/<how many>/<anything>: read again the client's screenshots that
+//   an older reader read.
+// The token lives in logs_meta ('dev_token' = token|expiry) and is put there by hand.
+export async function handleLogsDev(req, env, url, ctx) {
+  const db = env.LOGS_DB;
+  if (!db || req.method !== "GET") return plain("Not found", 404);
+  await ensureLogsSchema(db);
+  const m = url.pathname.match(/^\/api\/logs\/dev\/([A-Za-z0-9_-]{24,})\/(.+)$/);
+  const row = await db.prepare("SELECT value FROM logs_meta WHERE key = 'dev_token'").first();
+  const [tok, until] = String((row && row.value) || "").split("|");
+  if (!m || !tok || !(Number(until) > nowS()) || !safeEqual(await sha256hex(m[1]), await sha256hex(tok))) return plain("Not found", 404);
+  const rest = m[2];
+  let mm;
+  if ((mm = rest.match(/^trial\/(\d+)$/))) {
+    const id = Number(mm[1]);
+    const it = await db.prepare("SELECT id, mime FROM logs_items WHERE id = ?").bind(id).first();
+    if (!it) return json({ ok: false, error: "no such item" }, 404);
+    try {
+      const out = await readPicture(env, `data:${it.mime};base64,${await loadB64(db, id)}`);
+      const keep = JSON.stringify({ at: nowS(), model: out.model, raw: out.raw, r: out.r, flat: flatFields(out.r) });
+      await db.prepare("INSERT INTO logs_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(`trial:${id}`, keep).run();
+      const f = flatFields(out.r);
+      return json({ ok: true, id, screen: out.r.screen, kcal: f.kcal, protein: f.protein, unsure: out.r.unsure || [] });
+    } catch (e) {
+      return json({ ok: false, id, error: String((e && e.message) || e).slice(0, 300) });
+    }
+  }
+  if ((mm = rest.match(/^reread\/(\d+)\/(\d+)\/[A-Za-z0-9_-]*$/))) {
+    const n = Math.min(25, Math.max(1, Number(mm[2])));
+    const { results } = await db
+      .prepare("SELECT id FROM logs_items WHERE client_id = ? AND status IN ('read','new','failed') AND rv < ? ORDER BY received_at, id LIMIT ?")
+      .bind(Number(mm[1]), READER_V, n)
+      .all();
+    const res = await readMany(env, ctx, results.map((r) => r.id), n);
+    const left = await db.prepare("SELECT COUNT(*) AS n FROM logs_items WHERE client_id = ? AND status IN ('read','new','failed') AND rv < ?").bind(Number(mm[1]), READER_V).first();
+    return json({ ok: true, tried: results.length, ...res, left: left.n });
+  }
+  return plain("Not found", 404);
 }

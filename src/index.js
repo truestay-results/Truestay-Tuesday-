@@ -3,7 +3,7 @@
 // Anything under /api/* runs here, so tools can have real backends (D1, KV, etc).
 
 import { handlePay, payCron } from "./pay.js";
-import { handleLogsShare, logsCron } from "./logs.js";
+import { handleLogsShare, handleLogsDev, logsCron, readerFetch } from "./logs.js";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -23,6 +23,11 @@ export default {
       return handlePay(request, env, url, ctx);
     }
 
+    // TEMPORARY: checking the new screenshot reader (see handleLogsDev)
+    if (url.pathname.startsWith("/api/logs/dev/")) {
+      return handleLogsDev(request, env, url, ctx);
+    }
+
     // TrueStay Logs share button (iPhone Shortcut). The app's own routes live under /api/pay/logs.
     if (url.pathname.startsWith("/api/logs/")) {
       return handleLogsShare(request, env, url, ctx);
@@ -39,6 +44,14 @@ export default {
   // TrueStay Logs reads anything it missed and clears out old screenshots.
   async scheduled(event, env, ctx) {
     ctx.waitUntil(payCron(env));
-    ctx.waitUntil(logsCron(env).catch((e) => console.error("logs cron", e && e.message)));
+    ctx.waitUntil(logsCron(env, ctx).catch((e) => console.error("logs cron", e && e.message)));
+  },
+};
+
+// TrueStay Logs reads each screenshot in its own invocation through this loopback entrypoint
+// (ctx.exports.Reader), so a batch of reads never runs into one request's CPU limit. Not reachable from outside.
+export const Reader = {
+  async fetch(request, env) {
+    return readerFetch(request, env);
   },
 };
