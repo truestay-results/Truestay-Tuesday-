@@ -22,11 +22,11 @@ Your job is to say exactly what each number on the screen IS: a whole day's tota
 export const PROMPT = `Fill in this JSON for the screenshot. Use null for anything that is not on the screen.
 
 "screen" is one of:
-- "day_summary": shows totals for the WHOLE DAY, e.g. a dashboard with calories consumed and macros like "50/81 g", or a diary showing the day's total.
+- "day_summary": shows totals for the WHOLE DAY, e.g. a dashboard with calories consumed and macros like "50/81 g", or a diary for one date with the day's calories in a ring, circle or big number at the top (meals may follow below it).
 - "meal": ONE meal only (Breakfast, Lunch, Dinner, Snacks or similar) with that meal's totals and its foods.
 - "diary_part": a diary scrolled so you see some meals but NOT the whole day's total.
 - "food_item": one food's details.
-- "steps": steps or activity for a day.
+- "steps": steps or activity for a day (even if an average for the week is also shown).
 - "weight": body weight.
 - "period_summary": a week, a month or several days (averages, charts, labels like "Sep 6–12" or "Last 7 days").
 - "other".
@@ -43,7 +43,7 @@ export const PROMPT = `Fill in this JSON for the screenshot. Use null for anythi
     "fat": {"eaten": 0, "goal": 0, "text": "exact text"}
   },
   "meals": [
-    {"name": "Breakfast", "logged": true, "calories": 0, "calorie_target": 0, "protein": 0, "carbs": 0, "fat": 0, "foods": [{"name": "Porridge oats", "calories": 157}], "all_foods_visible": true}
+    {"name": "Breakfast", "logged": true, "totals_text": "this meal's own totals exactly as printed, e.g. 53.0 g Carbs 21.3 g Protein 14.3 g Fat 443.9 kcal, or 558/406 kcal", "calories": 0, "calorie_target": 0, "protein": 0, "carbs": 0, "fat": 0, "foods": [{"name": "Porridge oats", "calories": 157}], "all_foods_visible": true}
   ],
   "steps": {"count": 0, "goal": 0, "text": "exact text, e.g. 11.2k / 10.0k or 13,681", "for": "today, yesterday, week_average or other"},
   "exercise_kcal": 0,
@@ -57,8 +57,11 @@ Rules:
 - "day" is only for numbers that cover the whole day. Use null for "day" on meal, diary_part, food_item and period_summary screens.
 - In a pair like "16/81 g", "11.2k / 10.0k" or "558/406 kcal" the FIRST number is what was eaten or done and the SECOND is the goal. Copy the pair into "text".
 - Never put a goal, target, budget, remaining, over or burned number in "eaten" or "count".
-- "meals": every meal section you can see. "logged" is false when a section is empty: a + button, "Log food", "Add food", 0 kcal or no foods. Give a meal's own totals only if they are printed for that meal. Put macros printed as 0.0 g as 0, not null. List the foods you can see with their calories, up to 12. "all_foods_visible" is false if the list runs off the screen.
-- "steps": "for" is "yesterday" when the steps are labelled Yesterday, "week_average" for an average over several days.
+- "meals": every meal section you can see. "name" is the meal's name as printed (Breakfast, Lunch, Dinner, Snacks...), or null if it's scrolled out of view; never a heading like Components or Foods.
+- "logged" is true if the section has a tick, foods or calories; false if it only has a + / Add / Log food button or shows 0 kcal.
+- "totals_text", "calories", "protein", "carbs", "fat": only this meal's own totals as printed on the screen. If no totals are printed for the meal, use null for all of them, even if you could add up the foods. Macros printed as 0.0 g are 0.
+- "foods": the foods you can see with their calories, up to 12. "all_foods_visible" is false if the list runs off the screen.
+- "steps" is ONE day's steps. If the screen also shows an average over several days, give the day's steps, not the average. "for" is "yesterday" when they're labelled Yesterday. Use null if no step count is printed.
 - "cut_off" is true if the screen is scrolled so the day's or a meal's totals are out of view.
 - "extras": up to 4 other daily numbers worth a coach seeing, e.g. water, fibre, distance, sleep. Not goals.
 - "note": empty, unless something stands out for a coach, e.g. a warning from the app.
@@ -140,6 +143,10 @@ export function kNum(s) {
   return Number.isFinite(n) ? n : null;
 }
 const hasK = (s) => /\d(?:\.\d+)?\s*k\b/i.test(String(s || ""));
+// every number in a piece of copied text ("1,729 Consumed" -> [1729], "53.0 g Carbs 21.3 g Protein" -> [53, 21.3])
+export const numsIn = (text) => (String(text || "").replace(/(\d),(?=\d{3}\b)/g, "$1").match(/\d+(?:\.\d+)?/g) || []).map(Number);
+// a number the model gave is only kept if it's in the text it copied from the screen
+const backed = (v, text) => v == null || numsIn(text).some((n) => Math.abs(n - v) <= 0.15 + Math.abs(v) * 0.002);
 
 // "16/81 g", "11.2k / 10.0k", "558/406 kcal", "1,254 of 1,500": first is eaten or done, second the goal
 export function parsePair(text) {
@@ -206,6 +213,12 @@ function cleanNutrient(v, key, fixes) {
       eaten = pair.a;
     }
     if (pair.b >= lo && pair.b <= hi) goal = pair.b;
+  } else if (key !== "kcal" && text && eaten != null && !backed(eaten, text)) {
+    const n = numsIn(text);
+    if (n.length === 1 && n[0] >= lo && n[0] <= hi) {
+      fixes.push(`${key}: ${eaten} didn't match the text "${text}"`);
+      eaten = n[0];
+    }
   } else if (key === "kcal" && text) {
     // calories: the copied text should be the eaten number, not remaining, over, burned or the goal
     const n = kNum(text);
@@ -279,9 +292,10 @@ export function cleanReading(o) {
       .slice(0, 14)
       .map((f) => ({ name: str(obj(f).name, 40), kcal: num(obj(f).calories ?? obj(f).kcal, 0, 5000, 1) }))
       .filter((f) => f.name);
+    const ttext = str(mm.totals_text, 90);
     const meal = {
-      name,
-      slot: slotOf(name),
+      name: name && /^(components|foods?|items|ingredients|meal|totals?)$/i.test(name) ? null : name,
+      slot: null,
       logged: mm.logged === false || mm.logged === "false" ? false : true,
       kcal: num(mm.calories ?? mm.kcal, 0, 6000, 1),
       kcal_target: num(mm.calorie_target ?? mm.target, 0, 6000),
@@ -290,8 +304,27 @@ export function cleanReading(o) {
       fat: num(mm.fat, 0, 400, 1),
       foods,
       full: !(mm.all_foods_visible === false || mm.all_foods_visible === "false"),
+      text: ttext,
     };
-    if (meal.kcal === 0 && !foods.length) meal.logged = false;
+    meal.slot = slotOf(meal.name);
+    // a meal's totals count only if they were copied off the screen: no text, no numbers (zeros for unprinted
+    // totals would look like food with no macros)
+    if (!ttext) {
+      meal.kcal = meal.protein = meal.carbs = meal.fat = meal.kcal_target = null;
+    } else {
+      const pair = parsePair(ttext);
+      if (pair && /kcal|cal\b/i.test(ttext) && !/g\b/.test(ttext.split("/")[0])) {
+        meal.kcal = pair.a;
+        meal.kcal_target = pair.b;
+      }
+      for (const k of ["kcal", "protein", "carbs", "fat"]) {
+        if (meal[k] != null && !backed(meal[k], ttext)) {
+          fixes.push(`${meal.name || "meal"} ${k}: ${meal[k]} isn't in "${ttext}"`);
+          meal[k] = null;
+        }
+      }
+      if (meal.kcal === 0 && !foods.length) meal.logged = false;
+    }
     if (meal.kcal > 0 || foods.some((f) => f.kcal > 0)) meal.logged = true;
     if (!meal.name && meal.kcal == null && !foods.length) continue;
     meals.push(meal);
@@ -313,7 +346,8 @@ export function cleanReading(o) {
     }
     sgoal = spair.b;
   } else if (scount == null && stext) scount = num(kNum(stext), 0, 150000);
-  if (scount != null && !/week|average|avg|other/.test(stepsFor) && screen !== "period_summary") {
+  if (scount === 0) scount = null; // "0" is what's there before anything syncs, not a day's steps
+  if (scount != null && !/week|average|avg/.test(stepsFor) && !(screen === "period_summary" && !/today|yesterday/.test(stepsFor))) {
     steps = { count: scount, goal: sgoal, text: stext, approx: hasK(String(stext || "").split(/\/|\bof\b/i)[0]), yesterday: /yesterday/.test(stepsFor) };
   }
 
