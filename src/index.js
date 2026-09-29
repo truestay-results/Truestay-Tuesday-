@@ -51,7 +51,7 @@ export default {
 // TrueStay Logs reads each screenshot in its own invocation through this loopback entrypoint
 // (ctx.exports.Reader), so a batch of reads never runs into one request's CPU limit. Not reachable from outside.
 export const Reader = {
-  async fetch(request, env) {
-    return readerFetch(request, env);
+  async fetch(request, env, ctx) {
+    return readerFetch(request, env, ctx);
   },
 };

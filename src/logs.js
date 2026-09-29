@@ -891,16 +891,17 @@ const CRON_READS = 20;
 const REREAD_OLD = false; // switched on once the new reader has been checked against real screenshots
 // Each read runs as its own invocation (ctx.exports.Reader, a loopback to this Worker) so one hourly run can
 // read 20 pictures without going over the per-invocation CPU limit. Stops early if the day's AI allowance runs out.
-export async function readMany(env, ctx, ids, conc = 4) {
+// background: each read carries on in its own invocation after answering straight away (for callers that can't wait).
+export async function readMany(env, ctx, ids, conc = 4, background = false) {
   const reader = ctx && ctx.exports && ctx.exports.Reader;
-  const out = { read: 0, failed: 0, limit: false, loopback: !!reader };
+  const out = { read: 0, failed: 0, limit: false, started: 0, loopback: !!reader };
   for (let i = 0; i < ids.length && !out.limit; i += conc) {
     const chunk = ids.slice(i, i + conc);
     const results = await Promise.all(
       chunk.map(async (id) => {
         try {
           if (reader) {
-            const res = await reader.fetch(new Request(`https://reader.internal/read/${id}`, { method: "POST" }));
+            const res = await reader.fetch(new Request(`https://reader.internal/read/${id}${background ? "?bg=1" : ""}`, { method: "POST" }));
             return await res.json();
           }
           const it = await readItem(env, id);
@@ -911,7 +912,8 @@ export async function readMany(env, ctx, ids, conc = 4) {
       })
     );
     for (const r of results) {
-      if (r && r.error === LIMIT_NOTE) out.limit = true;
+      if (r && r.started) out.started++;
+      else if (r && r.error === LIMIT_NOTE) out.limit = true;
       else if (r && r.ok && r.status === "read") out.read++;
       else out.failed++;
     }
@@ -920,9 +922,14 @@ export async function readMany(env, ctx, ids, conc = 4) {
 }
 
 // The loopback entrypoint behind readMany (exported from index.js as Reader).
-export async function readerFetch(req, env) {
-  const m = new URL(req.url).pathname.match(/^\/read\/(\d+)$/);
+export async function readerFetch(req, env, ctx) {
+  const u = new URL(req.url);
+  const m = u.pathname.match(/^\/read\/(\d+)$/);
   if (!m || req.method !== "POST") return json({ ok: false, error: "Not found" }, 404);
+  if (u.searchParams.get("bg") && ctx && ctx.waitUntil) {
+    ctx.waitUntil(ensureLogsSchema(env.LOGS_DB).then(() => readItem(env, Number(m[1]))).catch((e) => console.error("reader bg", e && e.message)));
+    return json({ ok: true, started: true }, 202);
+  }
   try {
     await ensureLogsSchema(env.LOGS_DB);
     const it = await readItem(env, Number(m[1]));
@@ -953,15 +960,17 @@ export async function handleLogsDev(req, env, url, ctx) {
     const id = Number(mm[1]);
     const it = await db.prepare("SELECT id, mime FROM logs_items WHERE id = ?").bind(id).first();
     if (!it) return json({ ok: false, error: "no such item" }, 404);
-    try {
-      const out = await readPicture(env, `data:${it.mime};base64,${await loadB64(db, id)}`);
-      const keep = JSON.stringify({ at: nowS(), model: out.model, raw: out.raw, r: out.r, flat: flatFields(out.r) });
-      await db.prepare("INSERT INTO logs_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(`trial:${id}`, keep).run();
-      const f = flatFields(out.r);
-      return json({ ok: true, id, screen: out.r.screen, kcal: f.kcal, protein: f.protein, unsure: out.r.unsure || [] });
-    } catch (e) {
-      return json({ ok: false, id, error: String((e && e.message) || e).slice(0, 300) });
-    }
+    const save = (v) => db.prepare("INSERT INTO logs_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").bind(`trial:${id}`, JSON.stringify(v)).run();
+    const work = (async () => {
+      try {
+        const out = await readPicture(env, `data:${it.mime};base64,${await loadB64(db, id)}`);
+        await save({ at: nowS(), model: out.model, raw: out.raw, r: out.r, flat: flatFields(out.r) });
+      } catch (e) {
+        await save({ at: nowS(), error: String((e && e.message) || e).slice(0, 300) });
+      }
+    })();
+    ctx.waitUntil(work);
+    return json({ ok: true, id, started: true }, 202);
   }
   if ((mm = rest.match(/^reread\/(\d+)\/(\d+)\/[A-Za-z0-9_-]*$/))) {
     const n = Math.min(25, Math.max(1, Number(mm[2])));
@@ -969,7 +978,7 @@ export async function handleLogsDev(req, env, url, ctx) {
       .prepare("SELECT id FROM logs_items WHERE client_id = ? AND status IN ('read','new','failed') AND rv < ? ORDER BY received_at, id LIMIT ?")
       .bind(Number(mm[1]), READER_V, n)
       .all();
-    const res = await readMany(env, ctx, results.map((r) => r.id), n);
+    const res = await readMany(env, ctx, results.map((r) => r.id), n, true);
     const left = await db.prepare("SELECT COUNT(*) AS n FROM logs_items WHERE client_id = ? AND status IN ('read','new','failed') AND rv < ?").bind(Number(mm[1]), READER_V).first();
     return json({ ok: true, tried: results.length, ...res, left: left.n });
   }

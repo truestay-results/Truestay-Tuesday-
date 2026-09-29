@@ -1,0 +1,377 @@
+/* TrueStay Logs: putting one day together from its screenshots, and saying how sure we are.
+   Shared by the app (day cards, averages) and the PDF. No DOM, no network.
+
+   Where a day's food comes from, best first:
+   1. A whole-day total the app shows (dashboard, diary total, day view). Meal screenshots from the same day
+      are only used to check it; they're never added on top.
+   2. Otherwise the day is added up from its meal screenshots: one per meal, repeats dropped, a meal sent
+      twice counted once (the later one).
+   3. Nothing else. A single meal is never promoted to the day's total, and nothing is guessed.
+
+   Every day then gets a confidence for calories, for macros and for steps:
+   - high: a whole-day total that hangs together (and matches the meals when both were sent)
+   - medium: added up from clearly named meals, or a day total with one meal section empty
+   - low: a partial day (sections empty and the total well short of normal), a running total taken early,
+     meals missing, screenshots that disagree, food logged without macros, or a number we couldn't be sure of.
+   Averages only use high and medium days, and say how many they left out and why. Shan can overrule a day
+   ("Count it" / "Leave it out"), and numbers he types on a screenshot always win. */
+(function (root) {
+  "use strict";
+
+  const MAIN = ["breakfast", "lunch", "dinner"];
+  const SLOTS = ["breakfast", "lunch", "dinner", "snacks"];
+  const SLOT_NAME = { breakfast: "Breakfast", lunch: "Lunch", dinner: "Dinner", snacks: "Snacks" };
+  const RANK = { low: 0, medium: 1, high: 2 };
+  const lower = (a, b) => (RANK[a] <= RANK[b] ? a : b);
+
+  const ALC = /\b(wine|prosecco|champagne|cava|cr[eé]mant|beer|ale|ipa|lager|stout|porter|pilsner|bitter|cider|gin|vodka|rum|whisk(?:e)?y|bourbon|scotch|tequila|mezcal|brandy|cognac|liqueur|schnapps|sambuca|baileys|port|sherry|vermouth|aperol|spritz|cocktail|margarita|mojito|martini|negroni|daiquiri|pimm'?s|rioja|merlot|shiraz|malbec|sauvignon|pinot|chardonnay|ros[eé]|riesling|tempranillo|cabernet|grenache|zinfandel|moscato|sangria|alcohol|alcoholic)\b/i;
+  const NOT_ALC = /vinegar|gum\b|sauce|jelly|gravy|reduction|cooking|non[- ]?alcoholic|alcohol[- ]free|\b0(?:\.[05])?\s*%|\bzero\b|\b0\.0\b/i;
+  const isAlcohol = (name) => !!name && ALC.test(name) && !NOT_ALC.test(name);
+
+  const energy = (p, c, f) => (p == null || c == null || f == null ? null : 4 * p + 4 * c + 9 * f);
+  const r1 = (v) => (v == null ? null : Math.round(v * 10) / 10);
+  const fmt = (v) => Math.round(v).toLocaleString("en-GB");
+  const listAnd = (xs) => (xs.length <= 1 ? xs.join("") : `${xs.slice(0, -1).join(", ")} and ${xs[xs.length - 1]}`);
+  const hhmm = (min) => `${String(Math.floor(min / 60)).padStart(2, "0")}:${String(min % 60).padStart(2, "0")}`;
+  const isFood = (it) => it.kind === "food" || it.kind === "food_steps";
+  const v2 = (it) => !!(it.r && it.r.v >= 2);
+
+  // The numbers Shan typed: for the whole day, or one meal?
+  function typedScope(it) {
+    if (it.scope === "day" || it.scope === "meal") return it.scope;
+    if (v2(it)) return it.r.screen === "day_summary" ? "day" : ["meal", "diary_part", "food_item"].includes(it.r.screen) ? "meal" : "day";
+    return "day";
+  }
+
+  function mealKcal(m) {
+    if (m.kcal != null) return { kcal: m.kcal, derived: false };
+    const foods = m.foods || [];
+    if (m.full !== false && foods.length && foods.every((f) => f.kcal != null)) return { kcal: r1(foods.reduce((a, f) => a + f.kcal, 0)), derived: true };
+    return { kcal: null, derived: false };
+  }
+  const mealLabel = (m) => (m.slot && SLOT_NAME[m.slot]) || m.name || "A meal";
+  const sameNums = (a, b) => a.kcal != null && b.kcal != null && Math.abs(a.kcal - b.kcal) <= 1 && (a.protein == null || b.protein == null || Math.abs(a.protein - b.protein) <= 0.6);
+
+  // ---------- one day ----------
+  // items: that day's screenshots, each { id, kind, kcal, protein, carbs, fat, steps, edited, scope, extras, r (parsed reading), t (capture time, epoch s),
+  //   clockMin (minutes past midnight it was taken, or null), lag (0 = taken on the day itself, 1+ = later, null = unknown) }
+  // opts: { refKcal (a normal day for this client), verdict ('count' | 'omit' | undefined) }
+  function reconcileDay(day, items, opts = {}) {
+    const ref = opts.refKcal || null;
+    const notes = []; // plain words for the app and the PDF, most important first
+    const info = []; // worth knowing, not a problem
+    const food = { kcal: null, protein: null, carbs: null, fat: null, src: null, conf: null, macroConf: null, floor: false, missingMacroKcal: 0, alcoholKcal: 0, meals: [], empty: [] };
+    const ordered = items.slice().sort((a, b) => (a.t || 0) - (b.t || 0) || a.id - b.id);
+
+    // --- numbers typed by Shan ---
+    const typedDay = ordered.filter((it) => it.edited && isFood(it) && typedScope(it) === "day" && [it.kcal, it.protein, it.carbs, it.fat].some((v) => v != null));
+    // --- whole-day totals and meals from the new reader ---
+    const summaries = ordered.filter((it) => !it.edited && isFood(it) && v2(it) && it.r.screen === "day_summary" && it.r.day && it.r.day.kcal != null);
+    const entries = [];
+    for (const it of ordered) {
+      if (!isFood(it)) continue;
+      if (it.edited && typedScope(it) === "meal") {
+        const m0 = v2(it) && it.r.meals.length === 1 ? it.r.meals[0] : {};
+        entries.push({ slot: m0.slot || null, name: m0.name || null, logged: true, kcal: it.kcal, protein: it.protein, carbs: it.carbs, fat: it.fat, foods: m0.foods || [], full: true, t: it.t || 0, itemId: it.id, typed: true, fromDay: false });
+        continue;
+      }
+      if (it.edited || !v2(it)) continue;
+      for (const m of it.r.meals || []) entries.push({ ...m, t: it.t || 0, itemId: it.id, fromDay: it.r.screen === "day_summary" });
+    }
+    const legacy = ordered.filter((it) => isFood(it) && !it.edited && !v2(it) && (it.kcal != null || it.protein != null));
+
+    // empty sections: the latest word on each slot
+    const state = {};
+    for (const e of entries) {
+      if (!SLOTS.includes(e.slot)) continue;
+      const k = mealKcal(e).kcal;
+      const logged = e.logged !== false && !(k === 0 && !(e.foods || []).length);
+      if (!state[e.slot] || e.t >= state[e.slot].t) state[e.slot] = { logged: logged || (state[e.slot] && state[e.slot].logged && state[e.slot].t === e.t), t: e.t };
+    }
+    food.empty = SLOTS.filter((s) => state[s] && !state[s].logged);
+
+    // one entry per meal: the latest with a total; repeats of the same meal dropped
+    const chosen = [];
+    const dupNotes = [];
+    for (const slot of SLOTS) {
+      const es = entries.filter((e) => e.slot === slot && e.logged !== false);
+      const withK = es.filter((e) => mealKcal(e).kcal != null && mealKcal(e).kcal > 0);
+      if (!withK.length) {
+        if (es.some((e) => !e.fromDay)) chosen.push({ ...es[es.length - 1], kcal: null, unknownTotal: true });
+        continue;
+      }
+      const best = withK[withK.length - 1];
+      const differs = withK.filter((e) => !e.fromDay && e.itemId !== best.itemId && !sameNums({ kcal: mealKcal(e).kcal, protein: e.protein }, { kcal: mealKcal(best).kcal, protein: best.protein }));
+      if (differs.length && !best.fromDay) dupNotes.push(`${SLOT_NAME[slot]} was sent twice with different totals; used the later one`);
+      chosen.push({ ...best, kcal: mealKcal(best).kcal, derived: mealKcal(best).derived });
+    }
+    // meals whose name is cut off or isn't one of the four: kept unless they repeat one already counted
+    for (const e of entries.filter((x) => !SLOTS.includes(x.slot) && x.logged !== false && !x.fromDay)) {
+      const k = mealKcal(e);
+      if (k.kcal == null || k.kcal <= 0) continue;
+      const cand = { ...e, kcal: k.kcal, derived: k.derived };
+      if (chosen.some((c) => sameNums(c, cand))) continue;
+      chosen.push(cand);
+    }
+    food.meals = chosen.filter((m) => m.kcal != null).map((m) => ({ label: mealLabel(m), slot: m.slot || null, kcal: m.kcal, protein: m.protein, carbs: m.carbs, fat: m.fat, fromDay: !!m.fromDay, derived: !!m.derived }));
+    const mealShots = chosen.filter((m) => !m.fromDay);
+    const mealSum = r1(mealShots.filter((m) => m.kcal != null).reduce((a, m) => a + m.kcal, 0));
+
+    // alcohol and meals logged without macros
+    let alcohol = 0;
+    const noMacro = [];
+    for (const m of chosen) {
+      if (m.kcal == null) continue;
+      const alc = (m.foods || []).filter((f) => isAlcohol(f.name) && f.kcal != null).reduce((a, f) => a + f.kcal, 0);
+      alcohol += alc;
+      const e = energy(m.protein, m.carbs, m.fat);
+      const solid = m.kcal - alc;
+      if (e != null && solid >= 60 && e < 0.35 * solid) {
+        const foods = (m.foods || []).filter((f) => !isAlcohol(f.name));
+        noMacro.push({ label: mealLabel(m), kcal: Math.round(solid - e), food: foods.length === 1 ? foods[0].name : null });
+      }
+    }
+    food.alcoholKcal = Math.round(alcohol);
+
+    // --- the day's food numbers ---
+    let conf = null;
+    let macroConf = null;
+    if (typedDay.length) {
+      const it = typedDay[typedDay.length - 1];
+      Object.assign(food, { kcal: it.kcal, protein: it.protein, carbs: it.carbs, fat: it.fat, src: "typed" });
+      conf = "high";
+      notes.push("Numbers typed by you");
+    } else if (summaries.length) {
+      const it = summaries[summaries.length - 1];
+      const d = it.r.day;
+      Object.assign(food, { kcal: d.kcal, protein: d.protein, carbs: d.carbs, fat: d.fat, src: "total" });
+      conf = "high";
+      const unsure = it.r.unsure || [];
+      if (unsure.includes("kcal")) {
+        conf = "low";
+        notes.push("Couldn't be sure of the calories on the screenshot");
+      }
+      // two day totals: the later one should be the same or higher
+      const prev = summaries.slice(0, -1).filter((s) => s.r.day.kcal != null);
+      if (prev.length) {
+        const p = prev[prev.length - 1].r.day.kcal;
+        if (p > d.kcal + Math.max(30, d.kcal * 0.03)) {
+          conf = lower(conf, "medium");
+          notes.push(`Two day totals that don't agree (${fmt(p)} and ${fmt(d.kcal)}); used the later one`);
+        }
+      }
+      // a running total: taken on the day itself, well before evening
+      if (it.lag === 0 && it.clockMin != null && it.clockMin < 16 * 60) {
+        conf = "low";
+        notes.push(`Taken at ${hhmm(it.clockMin)}, before the day was over`);
+      }
+      // meal screenshots are a check on the total, never added to it
+      if (mealShots.length && mealSum > 0) {
+        if (mealSum > d.kcal + Math.max(40, d.kcal * 0.03)) {
+          conf = lower(conf, "medium");
+          notes.push(`The meal screenshots add up to ${fmt(mealSum)}, more than the day total of ${fmt(d.kcal)}`);
+        } else if (Math.abs(mealSum - d.kcal) <= Math.max(15, d.kcal * 0.02)) info.push("Day total matches the meal screenshots");
+      }
+      // sections left empty
+      const emptyMain = MAIN.filter((s) => food.empty.includes(s));
+      const loggedNames = SLOTS.filter((s) => state[s] && state[s].logged).map((s) => SLOT_NAME[s]);
+      if (emptyMain.length) {
+        const what = loggedNames.length === 1 ? `Only ${loggedNames[0]} logged` : `${listAnd(emptyMain.map((s) => SLOT_NAME[s]))} not logged`;
+        if ((ref && d.kcal < 0.6 * ref) || (!ref && emptyMain.length >= 2)) {
+          conf = "low";
+          food.partial = true;
+          notes.push(what);
+        } else if (!ref || d.kcal < 0.85 * ref) {
+          conf = lower(conf, "medium");
+          notes.push(what);
+        } else info.push(what);
+      } else if (ref && d.kcal < 0.45 * ref) {
+        conf = "low";
+        food.partial = true;
+        notes.push(`Much lower than usual (${fmt(d.kcal)}); maybe not everything was logged`);
+      }
+    } else if (chosen.length) {
+      const known = chosen.filter((m) => m.kcal != null);
+      const unknownTotals = chosen.filter((m) => m.kcal == null);
+      const sum = (k) => (known.length && known.every((m) => m[k] != null) ? r1(known.reduce((a, m) => a + m[k], 0)) : null);
+      Object.assign(food, { kcal: known.length ? r1(known.reduce((a, m) => a + m.kcal, 0)) : null, protein: sum("protein"), carbs: sum("carbs"), fat: sum("fat"), src: "meals" });
+      conf = "medium";
+      const named = new Set(known.map((m) => m.slot).filter(Boolean));
+      const unnamed = known.filter((m) => !SLOTS.includes(m.slot)).length;
+      const missing = MAIN.filter((s) => !named.has(s) && !food.empty.includes(s));
+      const missingCount = Math.max(0, missing.length - unnamed);
+      notes.push(`Added up from ${known.length} meal screenshot${known.length === 1 ? "" : "s"} (no day total sent)`);
+      if (unknownTotals.length) {
+        conf = "low";
+        food.partial = true;
+        notes.push(`${listAnd(unknownTotals.map(mealLabel))} total not on the screenshot`);
+      } else if (missingCount >= 2) {
+        conf = "low";
+        food.partial = true;
+        notes.push(`Only ${listAnd(known.map(mealLabel))} sent`);
+      } else if (missingCount === 1) {
+        const miss = missing.length === 1 ? `No ${SLOT_NAME[missing[0]]} screenshot` : "One of the main meals has no screenshot";
+        if (ref && food.kcal < 0.6 * ref) {
+          conf = "low";
+          food.partial = true;
+        }
+        notes.push(miss);
+      }
+      if (conf !== "low" && ref && food.kcal != null && food.kcal < 0.45 * ref) {
+        conf = "low";
+        food.partial = true;
+        notes.push(`Much lower than usual (${fmt(food.kcal)}); maybe not everything was sent`);
+      }
+    } else if (legacy.length) {
+      // read by the first version of the reader: shown, but not trusted until it's read again
+      const mx = (k) => legacy.reduce((a, it) => (it[k] == null ? a : a == null ? it[k] : Math.max(a, it[k])), null);
+      Object.assign(food, { kcal: mx("kcal"), protein: mx("protein"), carbs: mx("carbs"), fat: mx("fat"), src: "old" });
+      conf = "low";
+      notes.push("Read by the old reader; being read again");
+    }
+    if (dupNotes.length) {
+      notes.push(...dupNotes);
+      if (conf === "high") conf = "medium";
+    }
+
+    // --- macros ---
+    if (food.kcal != null && [food.protein, food.carbs, food.fat].some((v) => v != null)) {
+      macroConf = conf;
+      const e = energy(food.protein, food.carbs, food.fat);
+      let missingKcal = 0;
+      let where = "";
+      if (noMacro.length) {
+        missingKcal = noMacro.reduce((a, m) => a + m.kcal, 0);
+        where = ` (${noMacro.map((m) => m.label + (m.food ? `: ${m.food}` : "")).join("; ")})`;
+      } else if (e != null && food.src !== "typed") {
+        const gap = food.kcal - e - alcohol;
+        if (gap > 0) missingKcal = Math.round(gap);
+      }
+      if (food.src !== "typed" && missingKcal >= Math.max(150, 0.12 * food.kcal)) {
+        macroConf = "low";
+        food.floor = true;
+        food.missingMacroKcal = Math.round(missingKcal);
+        notes.push(`${fmt(missingKcal)} kcal logged with no macros${where}, so protein, carbs and fat are too low`);
+      }
+      if (e != null && food.kcal >= 100 && e > food.kcal * 1.3 + 60 && food.src !== "typed") {
+        macroConf = "low";
+        notes.push("Protein, carbs and fat add up to more calories than the day, so one of them was misread");
+      }
+      const sum = summaries.length && food.src === "total" ? summaries[summaries.length - 1] : null;
+      const unsure = (sum && sum.r.unsure) || [];
+      if (unsure.some((f) => ["protein", "carbs", "fat", "macros"].includes(f))) {
+        macroConf = "low";
+        notes.push("Couldn't be sure of the macros on the screenshot (goal and eaten)");
+      }
+    }
+    if (food.alcoholKcal >= 100) info.push(`About ${fmt(food.alcoholKcal)} kcal from drinks`);
+
+    // --- steps ---
+    const steps = { value: null, approx: false, conf: null, note: "" };
+    const cands = [];
+    for (const it of ordered) {
+      if (it.edited && it.steps != null) cands.push({ value: it.steps, approx: false, typed: true, t: it.t || 0, it });
+      else if (!it.edited && v2(it) && it.r.steps && it.r.steps.count != null) cands.push({ value: it.r.steps.count, approx: !!it.r.steps.approx, t: it.t || 0, it });
+      else if (!it.edited && !v2(it) && it.steps != null) cands.push({ value: it.steps, approx: it.kind === "food_steps" && it.steps % 100 === 0, t: it.t || 0, it, old: true });
+    }
+    const typedSteps = cands.filter((c) => c.typed);
+    let pick = typedSteps.length ? typedSteps[typedSteps.length - 1] : cands[cands.length - 1];
+    if (pick && pick.approx) {
+      const exact = cands.filter((c) => !c.approx && Math.abs(c.value - pick.value) <= 50);
+      if (exact.length) pick = exact[exact.length - 1];
+    }
+    if (pick) {
+      steps.value = pick.value;
+      steps.approx = pick.approx;
+      steps.conf = pick.typed ? "high" : pick.approx ? "medium" : "high";
+      if (pick.approx) steps.note = "Rounded on the screenshot";
+      if (!pick.typed && pick.it.lag === 0 && pick.it.clockMin != null && pick.it.clockMin < 17 * 60) {
+        steps.conf = "low";
+        steps.note = `Taken at ${hhmm(pick.it.clockMin)}, before the day was over`;
+      }
+    }
+
+    // --- weight and other extras ---
+    const extras = [];
+    for (const it of ordered) for (const e of it.extras || []) if (!extras.some((x) => x.label.toLowerCase() === e.label.toLowerCase())) extras.push(e);
+
+    // --- Shan's call on the day ---
+    food.conf = conf;
+    food.macroConf = macroConf;
+    const counts = (c) => c === "high" || c === "medium";
+    const include = {
+      kcal: food.kcal != null && counts(conf),
+      protein: food.protein != null && counts(macroConf),
+      carbs: food.carbs != null && counts(macroConf),
+      fat: food.fat != null && counts(macroConf),
+      steps: steps.value != null && counts(steps.conf),
+    };
+    if (opts.verdict === "count") {
+      include.kcal = food.kcal != null;
+      for (const k of ["protein", "carbs", "fat"]) include[k] = food[k] != null && !food.floor && !(macroConf === "low" && notes.some((n) => /misread|Couldn't be sure of the macros/.test(n)));
+      include.steps = steps.value != null;
+    } else if (opts.verdict === "omit") {
+      for (const k of Object.keys(include)) include[k] = false;
+    }
+    const level = food.kcal == null ? steps.conf : conf;
+    return {
+      day,
+      food,
+      steps,
+      extras,
+      notes,
+      info,
+      include,
+      verdict: opts.verdict || null,
+      level,
+      // what needs a look: anything the averages leave out
+      flagged: (food.kcal != null && !include.kcal) || (food.protein != null && !include.protein) || (steps.value != null && !include.steps),
+    };
+  }
+
+  // ---------- a normal day for this client ----------
+  // Their calorie goal read off the screenshots, else the target set in the app, else the middle of their
+  // whole-day totals once there are a few.
+  function refKcal(itemsAll, target) {
+    const goals = itemsAll.map((it) => (it.r && it.r.v >= 2 ? goalOf(it.r) : it.kcal_goal)).filter((g) => g >= 800 && g <= 6000);
+    if (goals.length) return median(goals);
+    if (target && target.kcal) return target.kcal;
+    const totals = itemsAll.filter((it) => it.r && it.r.v >= 2 && it.r.screen === "day_summary" && it.r.day && it.r.day.kcal >= 500).map((it) => it.r.day.kcal);
+    return totals.length >= 5 ? median(totals) : null;
+  }
+  function goalOf(r) {
+    const d = r.day;
+    if (!d) return null;
+    if (d.kcal_goal) return d.kcal_goal;
+    if (d.kcal != null && d.kcal_left != null) return d.kcal + d.kcal_left;
+    if (d.kcal != null && d.kcal_over != null) return d.kcal - d.kcal_over;
+    return null;
+  }
+  function median(xs) {
+    const s = xs.slice().sort((a, b) => a - b);
+    const n = s.length;
+    return n % 2 ? s[(n - 1) / 2] : (s[n / 2 - 1] + s[n / 2]) / 2;
+  }
+
+  // ---------- averages that only use days we trust ----------
+  function summarize(days) {
+    const out = {};
+    const val = (d, k) => (k === "steps" ? d.steps.value : d.food[k]);
+    for (const k of ["kcal", "protein", "carbs", "fat", "steps"]) {
+      const used = days.filter((d) => d.include && d.include[k] && val(d, k) != null);
+      const left = days.filter((d) => val(d, k) != null && !(d.include && d.include[k]));
+      const xs = used.map((d) => val(d, k));
+      out[k] = { avg: xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null, n: used.length, left: left.map((d) => ({ day: d.day, why: whyLeft(d, k) })) };
+    }
+    return out;
+  }
+  function whyLeft(d, k) {
+    if (d.verdict === "omit") return "left out by you";
+    if (k === "steps") return (d.steps.note || "not sure of it").replace(/^./, (c) => c.toLowerCase());
+    const n = d.notes.find((x) => (k === "kcal" ? !/macros|protein, carbs/i.test(x) : true)) || d.notes[0] || "not sure of it";
+    return n.replace(/^./, (c) => c.toLowerCase());
+  }
+
+  const api = { reconcileDay, summarize, refKcal, isAlcohol, goalOf, median };
+  root.TSReconcile = api;
+})(typeof window !== "undefined" ? window : globalThis);
