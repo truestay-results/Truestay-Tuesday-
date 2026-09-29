@@ -137,7 +137,7 @@ export function cleanDate(v) {
 export function kNum(s) {
   if (s == null) return null;
   if (typeof s === "number") return Number.isFinite(s) ? s : null;
-  const m = String(s).replace(/(\d),(?=\d{3}\b)/g, "$1").match(/(-?\d+(?:\.\d+)?)\s*(k)?\b/i);
+  const m = String(s).replace(/(\d),(?=\d{3}\b)/g, "$1").match(/(-?\d+(?:\.\d+)?)\s*(k(?![a-z]))?/i);
   if (!m) return null;
   const n = Number(m[1]) * (m[2] ? 1000 : 1);
   return Number.isFinite(n) ? n : null;
@@ -196,7 +196,7 @@ const fmtKcal = (n) => `${Math.round(n).toLocaleString("en-GB")} kcal`;
 const LIM = { kcal: [0, 12000], protein: [0, 700], carbs: [0, 1500], fat: [0, 600] };
 
 // One nutrient on a day screen: the model's split, corrected by the pair it copied when there is one.
-function cleanNutrient(v, key, fixes) {
+function cleanNutrient(v, key, fixes, mismatch = []) {
   const [lo, hi] = LIM[key];
   let eaten, goal, text;
   if (v && typeof v === "object") {
@@ -213,20 +213,14 @@ function cleanNutrient(v, key, fixes) {
       eaten = pair.a;
     }
     if (pair.b >= lo && pair.b <= hi) goal = pair.b;
-  } else if (key !== "kcal" && text && eaten != null && !backed(eaten, text)) {
-    const n = numsIn(text);
-    if (n.length === 1 && n[0] >= lo && n[0] <= hi) {
-      fixes.push(`${key}: ${eaten} didn't match the text "${text}"`);
-      eaten = n[0];
-    }
+  } else if (key !== "kcal" && text && eaten != null && !backed(eaten, text) && !/-\s*\d/.test(text)) {
+    // the number doesn't match what it copied: a second look decides (a minus sign means a balance, not a total)
+    mismatch.push(key);
   } else if (key === "kcal" && text) {
     // calories: the copied text should be the eaten number, not remaining, over, burned or the goal
     const n = kNum(text);
     const wrongLabel = /remaining|left|over\b|burn|goal|budget|target/i.test(text) && !/consum|eaten|food|intake/i.test(text);
-    if (n != null && !wrongLabel && eaten != null && Math.abs(n - eaten) > 1) {
-      fixes.push(`kcal: ${eaten} didn't match the text "${text}"`);
-      eaten = num(n, lo, hi, 1);
-    }
+    if (n != null && n >= 0 && !/-\s*\d/.test(text) && !wrongLabel && eaten != null && Math.abs(n - eaten) > 1) mismatch.push("kcal");
     // the number it gave as eaten is the one printed as remaining, over, burned or the goal
     if (wrongLabel && n != null && eaten != null && Math.abs(n - eaten) <= 1) {
       fixes.push(`kcal: ${eaten} is the "${text}" number, not what was eaten`);
@@ -240,6 +234,7 @@ function cleanNutrient(v, key, fixes) {
 export function cleanReading(o) {
   o = obj(o);
   const fixes = [];
+  const mismatch = []; // numbers that don't match the text copied next to them: they get a second look
   let screen = String(o.screen || o.kind || "").toLowerCase().replace(/[^a-z_]/g, "");
   screen = SCREEN_ALIASES[screen] || screen;
   if (!SCREENS.includes(screen)) screen = "other";
@@ -263,10 +258,10 @@ export function cleanReading(o) {
   const d = obj(o.day);
   if (Object.keys(d).length && !["meal", "food_item", "period_summary"].includes(screen)) {
     const c = obj(d.calories);
-    const kc = cleanNutrient(d.calories, "kcal", fixes);
-    const p = cleanNutrient(d.protein, "protein", fixes);
-    const cb = cleanNutrient(d.carbs, "carbs", fixes);
-    const f = cleanNutrient(d.fat, "fat", fixes);
+    const kc = cleanNutrient(d.calories, "kcal", fixes, mismatch);
+    const p = cleanNutrient(d.protein, "protein", fixes, mismatch);
+    const cb = cleanNutrient(d.carbs, "carbs", fixes, mismatch);
+    const f = cleanNutrient(d.fat, "fat", fixes, mismatch);
     day = {
       kcal: kc.eaten,
       kcal_goal: num(c.goal ?? c.target ?? c.budget, 300, 9000),
@@ -361,7 +356,7 @@ export function cleanReading(o) {
   for (const e of arr(o.extras).slice(0, 6)) {
     const label = str(obj(e).label, 24);
     const value = str(obj(e).value != null ? String(obj(e).value) : null, 24);
-    if (!label || !value || /goal|target|remaining|budget|steps/i.test(label)) continue;
+    if (!label || !value || /goal|target|remaining|budget|steps|average|avg/i.test(label + " " + value)) continue;
     if (!extras.some((x) => x.label.toLowerCase() === label.toLowerCase())) extras.push({ label, value });
   }
   const weight = num(o.weight_kg, 25, 350, 1);
@@ -385,6 +380,7 @@ export function cleanReading(o) {
     cut_off: o.cut_off === true || o.cut_off === "true",
     note: str(o.note, 160) || "",
     fixes,
+    mismatch,
   };
 }
 
@@ -395,6 +391,7 @@ export function checkReading(r) {
   const d = r.day;
   if (d) {
     if (d.kcal == null && r.screen === "day_summary") out.push({ field: "kcal", issue: "no_eaten" });
+    for (const k of r.mismatch || []) out.push({ field: k, issue: "text_mismatch" });
     for (const k of ["protein", "carbs", "fat"]) {
       if (d[k] != null && d[k + "_goal"] != null && d[k] === d[k + "_goal"] && d[k] > 0 && !parsePair(d[k + "_text"])) out.push({ field: k, issue: "eaten_is_goal" });
     }
@@ -459,6 +456,10 @@ export function applyVerify(r, v, issues) {
       }
     }
   }
+  out.mismatch = (out.mismatch || []).filter((k) => {
+    const dv = obj(vd[k === "kcal" ? "calories" : k]);
+    return dv.eaten == null; // still unsettled only if the second look gave nothing for it
+  });
   const left = checkReading(out);
   out.fixes = (out.fixes || []).concat(fixes);
   out.checked = { asked: issues.map((i) => i.issue), still: left.map((i) => i.issue) };

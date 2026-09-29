@@ -353,3 +353,20 @@ details.manual .steps { padding: 4px 14px 16px; }
 }
 :focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
 .field input:focus-visible, .field select:focus-visible { outline: 0; }
+
+/* ---------- v3: how sure we are about each day ---------- */
+/* A number left out of the averages is muted and has a "?"; the reason is written underneath (never colour alone). */
+.nums .out b { color: var(--muted); font-weight: 500; }
+.nums .q { display: inline-grid; place-items: center; width: 16px; height: 16px; margin-left: 3px; border-radius: 50%; font-size: 11px; font-weight: 700; background: var(--amber-soft); color: var(--amber-ink); vertical-align: 1px; }
+.daycard.flagged { border-color: rgba(232, 154, 28, .45); }
+.daystat { margin: -4px 0 12px; }
+.daystat .ds-top { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; min-height: 32px; }
+.daystat .linkish { font-size: 13px; position: relative; }
+.day-notes { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+.day-notes li { display: flex; gap: 7px; align-items: flex-start; font-size: 13px; line-height: 1.35; color: var(--ink-2); }
+.day-notes li svg { width: 15px; height: 15px; flex: 0 0 auto; margin-top: 1px; }
+.day-notes li.warn { color: var(--amber-ink); }
+.day-notes li.muted { color: var(--muted); }
+.banner.warn { background: var(--amber-soft); color: var(--amber-ink); border-color: transparent; }
+.banner.warn svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.stats small.warn { color: #F5BD55; } /* the hero card is dark in both themes */

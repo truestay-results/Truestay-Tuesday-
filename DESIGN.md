@@ -120,4 +120,11 @@ A client might see these, so they use the TrueStay Results brand rather than the
 - Helvetica (built into every PDF reader), A4, 36pt margins
 - One measure per chart, never two scales on one chart. The target is a solid line, with its key next to the chart title so it never sits on a bar
 - A tick shape marks a day on target, so status is never colour alone. Missing numbers show as a lone dash
-- Screenshots three across with rounded corners and a hairline edge, two days to a page, each day headed with its totals
+- Screenshots three across with rounded corners and a hairline edge, two days to a page, each day headed with its totals and one line on how they were worked out
+- Days the checks don't trust stay in the table, but their numbers are grey with a `?`, the Check column says why in a few words, their chart bars are outlined instead of filled, and the averages leave them out (the tiles say how many). A `+` after protein, carbs or fat means some food was logged without macros, so the real number is higher
+
+## How sure we are (TrueStay Logs app)
+
+- A number the averages leave out is muted with a small `?` badge, and the reason is written under the day in words. Never colour alone
+- Each day card can say what it's based on ("Added up from meals"), what's left out ("Protein, carbs and fat left out of the averages") and offer one action: "Count it anyway" on a left-out day (only where counting would change something), "Leave it out" on a counted day with notes, "Undo" once you've decided
+- The hero's averages say "Avg of N days" and, in amber, "M left out"

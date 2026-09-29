@@ -36,21 +36,123 @@
   const isFood = (it) => it.kind === "food" || it.kind === "food_steps";
   const v2 = (it) => !!(it.r && it.r.v >= 2);
 
-  // The numbers Shan typed: for the whole day, or one meal?
-  function typedScope(it) {
+  // Shan's word on a screenshot beats the reader's: numbers he typed, or "these are the whole day's" / "one meal's"
+  const override = (it) => !!(it.edited || it.scope);
+  function roleOf(it) {
     if (it.scope === "day" || it.scope === "meal") return it.scope;
     if (v2(it)) return it.r.screen === "day_summary" ? "day" : ["meal", "diary_part", "food_item"].includes(it.r.screen) ? "meal" : "day";
     return "day";
   }
 
+  // A meal's total as printed; if it isn't printed, its foods added up, but only when the meal's name shows (so the
+  // list starts at the top) and nothing runs off the screen.
   function mealKcal(m) {
     if (m.kcal != null) return { kcal: m.kcal, derived: false };
     const foods = m.foods || [];
-    if (m.full !== false && foods.length && foods.every((f) => f.kcal != null)) return { kcal: r1(foods.reduce((a, f) => a + f.kcal, 0)), derived: true };
+    if ((m.slot || m.name) && m.full !== false && foods.length && foods.every((f) => f.kcal != null)) return { kcal: r1(foods.reduce((a, f) => a + f.kcal, 0)), derived: true };
     return { kcal: null, derived: false };
   }
   const mealLabel = (m) => (m.slot && SLOT_NAME[m.slot]) || m.name || "A meal";
   const sameNums = (a, b) => a.kcal != null && b.kcal != null && Math.abs(a.kcal - b.kcal) <= 1 && (a.protein == null || b.protein == null || Math.abs(a.protein - b.protein) <= 0.6);
+
+  // ---------- dates (UK) ----------
+  const UKF = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/London", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" });
+  function ukParts(t) {
+    const p = Object.fromEntries(UKF.formatToParts(new Date(t * 1000)).map((x) => [x.type, x.value]));
+    return { date: `${p.year}-${p.month}-${p.day}`, min: (+p.hour % 24) * 60 + +p.minute, hour: +p.hour % 24 };
+  }
+  const addDays = (s, n) => {
+    const d = new Date(s + "T12:00:00Z");
+    d.setUTCDate(d.getUTCDate() + n);
+    return d.toISOString().slice(0, 10);
+  };
+  const validISO = (s) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+    const d = new Date(s + "T12:00:00Z");
+    return !isNaN(d) && d.toISOString().slice(0, 10) === s;
+  };
+  const dObj = (iso) => new Date(iso + "T12:00:00Z");
+  const daysBetween = (a, b) => Math.round((dObj(b) - dObj(a)) / 86400000);
+  const WD_LONG = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+
+  // ---------- which day a screenshot belongs to ----------
+  // Priority: set by you > a date printed on the screenshot > when it was sent (from the file name or the photo)
+  // > when you shared it (only for small, nightly shares; a big batch shared later can't be dated that way).
+  function sessionSizes(items) {
+    const by = new Map();
+    for (const it of items) {
+      const k = it.batch || it.source;
+      if (!by.has(k)) by.set(k, []);
+      by.get(k).push(it);
+    }
+    const size = new Map();
+    for (const list of by.values()) {
+      list.sort((a, b) => a.received_at - b.received_at || a.id - b.id);
+      let start = 0;
+      for (let i = 1; i <= list.length; i++) {
+        if (i === list.length || list[i].received_at - list[i - 1].received_at > 600) {
+          for (let j = start; j < i; j++) size.set(list[j].id, i - start);
+          start = i;
+        }
+      }
+    }
+    return size;
+  }
+  function withYear(s, refT) {
+    const ref = ukParts(refT).date;
+    let iso = null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s) && validISO(s) && Math.abs(daysBetween(s, ref)) <= 60) iso = s;
+    else if (/^\d{4}-\d{2}-\d{2}$/.test(s)) s = s.slice(5);
+    if (!iso && /^\d{2}-\d{2}$/.test(s)) {
+      const y = +ref.slice(0, 4);
+      iso = `${y}-${s}`;
+      if (validISO(iso) && iso > addDays(ref, 2)) iso = `${y - 1}-${s}`;
+    }
+    if (!iso || !validISO(iso)) return null;
+    if (iso > addDays(ref, 2) || iso < addDays(ref, -400)) return null;
+    return iso;
+  }
+  // Also works out when it was taken, for putting a day together: t (for ordering), clockMin (the time on the
+  // phone when it was taken) and lag (0 = taken on the day it's for, 1 = the next day, e.g. last night's log
+  // sent after midnight, or a "Yesterday" screen).
+  function effDay(it, sizes) {
+    const r = it.r || {};
+    const m = String(r.clock || "").match(/^(\d{2}):(\d{2})$/);
+    const clock = m ? +m[1] * 60 + +m[2] : null;
+    const t = it.sent_at || it.received_at;
+    if (it.day && it.day_src === "manual") return { day: it.day, src: "manual", t, clockMin: clock, lag: null };
+    let ref = null;
+    if (it.sent_at) ref = { t: it.sent_at, src: it.sent_src === "photo" ? "photo" : it.sent_src === "name_day" ? "sentday" : "sent" };
+    else if (it.source === "share" && (sizes.get(it.id) || 1) <= 4) ref = { t: it.received_at, src: "shared" };
+    const p = ref ? ukParts(ref.t) : null;
+    // the day the picture was taken: the day it was sent, or the day before if the phone's clock says it was taken before midnight
+    let taken = p ? p.date : null;
+    if (p && ref.src !== "sentday" && clock != null && clock > p.min + 180) taken = addDays(taken, -1);
+    const lagFrom = (day) => (taken && day ? Math.max(0, daysBetween(day, taken)) : null);
+    if (r.date) {
+      const d = withYear(r.date, ref ? ref.t : it.received_at);
+      if (d) return { day: d, src: "screen", t, clockMin: clock, lag: lagFrom(d) };
+    }
+    if (!ref) return { day: null, src: null, t, clockMin: clock, lag: null };
+    let day = taken;
+    const shown = String(r.date_shown || "").toLowerCase();
+    const yesterday = /\byesterday\b/.test(shown);
+    // taken in the small hours (before 4am) of a screen still showing "today": that's last night's log.
+    // Not for "Yesterday" screens: the app has already moved on to the new day.
+    if (ref.src !== "sentday" && !yesterday) {
+      const takenMin = clock != null ? clock : p.min;
+      if (taken === p.date && takenMin < 240) day = addDays(day, -1);
+    }
+    if (yesterday) day = addDays(day, -1);
+    else if (!/\btoday\b/.test(shown)) {
+      const wd = WD_LONG.findIndex((w) => new RegExp(`\\b(${w}|${w.slice(0, 3)})\\b`).test(shown));
+      if (wd >= 0) {
+        const cur = dObj(day).getUTCDay();
+        day = addDays(day, -((cur - wd + 7) % 7));
+      }
+    }
+    return { day, src: ref.src, t, clockMin: clock != null ? clock : ref.src === "sentday" ? null : p.min, lag: lagFrom(day) };
+  }
 
   // ---------- one day ----------
   // items: that day's screenshots, each { id, kind, kcal, protein, carbs, fat, steps, edited, scope, extras, r (parsed reading), t (capture time, epoch s),
@@ -64,21 +166,75 @@
     const ordered = items.slice().sort((a, b) => (a.t || 0) - (b.t || 0) || a.id - b.id);
 
     // --- numbers typed by Shan ---
-    const typedDay = ordered.filter((it) => it.edited && isFood(it) && typedScope(it) === "day" && [it.kcal, it.protein, it.carbs, it.fat].some((v) => v != null));
+    const typedDay = ordered.filter((it) => override(it) && isFood(it) && roleOf(it) === "day" && [it.kcal, it.protein, it.carbs, it.fat].some((v) => v != null));
     // --- whole-day totals and meals from the new reader ---
-    const summaries = ordered.filter((it) => !it.edited && isFood(it) && v2(it) && it.r.screen === "day_summary" && it.r.day && it.r.day.kcal != null);
-    const entries = [];
-    for (const it of ordered) {
-      if (!isFood(it)) continue;
-      if (it.edited && typedScope(it) === "meal") {
-        const m0 = v2(it) && it.r.meals.length === 1 ? it.r.meals[0] : {};
-        entries.push({ slot: m0.slot || null, name: m0.name || null, logged: true, kcal: it.kcal, protein: it.protein, carbs: it.carbs, fat: it.fat, foods: m0.foods || [], full: true, t: it.t || 0, itemId: it.id, typed: true, fromDay: false });
-        continue;
+    const allSummaries = ordered.filter((it) => !override(it) && isFood(it) && v2(it) && it.r.screen === "day_summary" && it.r.day && it.r.day.kcal != null);
+    // Is a "day total" really one meal's? A dashboard shows goals, what's left, eaten/goal pairs or several meal
+    // sections. A meal's own screen scrolled past its title shows none of those. If a real dashboard came in too,
+    // or the day's meal screenshots add up to more than it, it's counted as a meal, never as the day.
+    const dayLike = (it) => {
+      const d = it.r.day;
+      const pairs = [d.protein_text, d.carbs_text, d.fat_text].some((t) => /\d\s*(?:\/|\bof\b)\s*\d/i.test(t || ""));
+      return d.kcal_goal != null || d.kcal_left != null || d.kcal_over != null || pairs || (it.r.meals || []).filter((m) => m.slot).length >= 2;
+    };
+    const demoted = new Set();
+    if (allSummaries.some(dayLike)) for (const it of allSummaries) if (!dayLike(it)) demoted.add(it.id);
+
+    let entries;
+    let chosen;
+    let dupNotes;
+    const build = () => {
+      entries = [];
+      for (const it of ordered) {
+        if (!isFood(it)) continue;
+        if (override(it) && roleOf(it) === "meal") {
+          const m0 = v2(it) && (it.r.meals || []).length === 1 ? it.r.meals[0] : {};
+          entries.push({ slot: m0.slot || null, name: m0.name || null, logged: true, kcal: it.kcal, protein: it.protein, carbs: it.carbs, fat: it.fat, foods: m0.foods || [], full: true, t: it.t || 0, itemId: it.id, typed: true, fromDay: false });
+          continue;
+        }
+        if (override(it) || !v2(it)) continue;
+        if (demoted.has(it.id)) {
+          const d = it.r.day;
+          const m0 = (it.r.meals || [])[0] || {};
+          entries.push({ slot: m0.slot || null, name: m0.name || null, logged: true, kcal: d.kcal, protein: d.protein, carbs: d.carbs, fat: d.fat, foods: m0.foods || [], full: true, t: it.t || 0, itemId: it.id, fromDay: false, demoted: true });
+          continue;
+        }
+        for (const m of it.r.meals || []) entries.push({ ...m, t: it.t || 0, itemId: it.id, fromDay: it.r.screen === "day_summary" });
       }
-      if (it.edited || !v2(it)) continue;
-      for (const m of it.r.meals || []) entries.push({ ...m, t: it.t || 0, itemId: it.id, fromDay: it.r.screen === "day_summary" });
+      // one entry per meal: the latest with a total; repeats of the same meal dropped
+      chosen = [];
+      dupNotes = [];
+      for (const slot of SLOTS) {
+        const es = entries.filter((e) => e.slot === slot && e.logged !== false);
+        const withK = es.filter((e) => mealKcal(e).kcal != null && mealKcal(e).kcal > 0);
+        if (!withK.length) {
+          if (es.some((e) => !e.fromDay)) chosen.push({ ...es[es.length - 1], kcal: null, unknownTotal: true });
+          continue;
+        }
+        const best = withK[withK.length - 1];
+        const differs = withK.filter((e) => !e.fromDay && e.itemId !== best.itemId && !sameNums({ kcal: mealKcal(e).kcal, protein: e.protein }, { kcal: mealKcal(best).kcal, protein: best.protein }));
+        if (differs.length && !best.fromDay) dupNotes.push(`${SLOT_NAME[slot]} was sent twice with different totals; used the later one`);
+        chosen.push({ ...best, kcal: mealKcal(best).kcal, derived: mealKcal(best).derived });
+      }
+      // meals whose name is cut off or isn't one of the four: kept unless they repeat one already counted
+      for (const e of entries.filter((x) => !SLOTS.includes(x.slot) && x.logged !== false && !x.fromDay)) {
+        const k = mealKcal(e);
+        if (k.kcal == null || k.kcal <= 0) continue;
+        const cand = { ...e, kcal: k.kcal, derived: k.derived };
+        if (chosen.some((c) => sameNums(c, cand))) continue;
+        chosen.push(cand);
+      }
+    };
+    build();
+    // a lone "day total" with no dashboard signs that's smaller than the meals sent alongside it is one meal
+    for (const it of allSummaries) {
+      if (demoted.has(it.id) || dayLike(it)) continue;
+      const others = chosen.filter((m) => !m.fromDay && m.kcal != null && m.itemId !== it.id).reduce((a, m) => a + m.kcal, 0);
+      if (others > it.r.day.kcal + Math.max(40, it.r.day.kcal * 0.03)) demoted.add(it.id);
     }
-    const legacy = ordered.filter((it) => isFood(it) && !it.edited && !v2(it) && (it.kcal != null || it.protein != null));
+    if (demoted.size) build();
+    const summaries = allSummaries.filter((it) => !demoted.has(it.id));
+    const legacy = ordered.filter((it) => isFood(it) && !override(it) && !v2(it) && (it.kcal != null || it.protein != null));
 
     // empty sections: the latest word on each slot
     const state = {};
@@ -90,29 +246,6 @@
     }
     food.empty = SLOTS.filter((s) => state[s] && !state[s].logged);
 
-    // one entry per meal: the latest with a total; repeats of the same meal dropped
-    const chosen = [];
-    const dupNotes = [];
-    for (const slot of SLOTS) {
-      const es = entries.filter((e) => e.slot === slot && e.logged !== false);
-      const withK = es.filter((e) => mealKcal(e).kcal != null && mealKcal(e).kcal > 0);
-      if (!withK.length) {
-        if (es.some((e) => !e.fromDay)) chosen.push({ ...es[es.length - 1], kcal: null, unknownTotal: true });
-        continue;
-      }
-      const best = withK[withK.length - 1];
-      const differs = withK.filter((e) => !e.fromDay && e.itemId !== best.itemId && !sameNums({ kcal: mealKcal(e).kcal, protein: e.protein }, { kcal: mealKcal(best).kcal, protein: best.protein }));
-      if (differs.length && !best.fromDay) dupNotes.push(`${SLOT_NAME[slot]} was sent twice with different totals; used the later one`);
-      chosen.push({ ...best, kcal: mealKcal(best).kcal, derived: mealKcal(best).derived });
-    }
-    // meals whose name is cut off or isn't one of the four: kept unless they repeat one already counted
-    for (const e of entries.filter((x) => !SLOTS.includes(x.slot) && x.logged !== false && !x.fromDay)) {
-      const k = mealKcal(e);
-      if (k.kcal == null || k.kcal <= 0) continue;
-      const cand = { ...e, kcal: k.kcal, derived: k.derived };
-      if (chosen.some((c) => sameNums(c, cand))) continue;
-      chosen.push(cand);
-    }
     food.meals = chosen.filter((m) => m.kcal != null).map((m) => ({ label: mealLabel(m), slot: m.slot || null, kcal: m.kcal, protein: m.protein, carbs: m.carbs, fat: m.fat, fromDay: !!m.fromDay, derived: !!m.derived }));
     const mealShots = chosen.filter((m) => !m.fromDay);
     const mealSum = r1(mealShots.filter((m) => m.kcal != null).reduce((a, m) => a + m.kcal, 0));
@@ -140,19 +273,31 @@
       const it = typedDay[typedDay.length - 1];
       Object.assign(food, { kcal: it.kcal, protein: it.protein, carbs: it.carbs, fat: it.fat, src: "typed" });
       conf = "high";
-      notes.push("Numbers typed by you");
+      notes.push(it.edited ? "Numbers typed by you" : "Marked by you as the day's total");
     } else if (summaries.length) {
-      const it = summaries[summaries.length - 1];
+      // a "day total" that's the same as the calorie goal on the day's screenshots is probably the goal
+      const goals = ordered.map((x) => (v2(x) ? goalOf(x.r) : x.kcal_goal)).filter((g) => g != null);
+      const isGoal = (x) => goals.some((g) => Math.abs(g - x.r.day.kcal) <= 1);
+      const good = summaries.filter((x) => !isGoal(x));
+      const pool = good.length ? good : summaries;
+      const likes = pool.filter(dayLike);
+      const it = (likes.length ? likes : pool)[(likes.length ? likes : pool).length - 1];
       const d = it.r.day;
       Object.assign(food, { kcal: d.kcal, protein: d.protein, carbs: d.carbs, fat: d.fat, src: "total" });
+      Object.defineProperty(food, "fromItem", { value: it, enumerable: false });
       conf = "high";
+      if (demoted.size) info.push(`${demoted.size === 1 ? "A meal screenshot" : `${demoted.size} meal screenshots`} counted as meals, not the day`);
       const unsure = it.r.unsure || [];
       if (unsure.includes("kcal")) {
         conf = "low";
         notes.push("Couldn't be sure of the calories on the screenshot");
       }
+      if (!good.length) {
+        conf = "low";
+        notes.push(`The day total (${fmt(d.kcal)}) is the same as the calorie goal, so it may be the goal`);
+      } else if (good.length < summaries.length) info.push(`Ignored a screenshot whose "total" is the calorie goal`);
       // two day totals: the later one should be the same or higher
-      const prev = summaries.slice(0, -1).filter((s) => s.r.day.kcal != null);
+      const prev = pool.filter((s) => s !== it && s.t <= it.t && s.r.day.kcal != null);
       if (prev.length) {
         const p = prev[prev.length - 1].r.day.kcal;
         if (p > d.kcal + Math.max(30, d.kcal * 0.03)) {
@@ -257,7 +402,7 @@
         macroConf = "low";
         notes.push("Protein, carbs and fat add up to more calories than the day, so one of them was misread");
       }
-      const sum = summaries.length && food.src === "total" ? summaries[summaries.length - 1] : null;
+      const sum = food.src === "total" ? food.fromItem : null;
       const unsure = (sum && sum.r.unsure) || [];
       if (unsure.some((f) => ["protein", "carbs", "fat", "macros"].includes(f))) {
         macroConf = "low";
@@ -291,9 +436,16 @@
       }
     }
 
-    // --- weight and other extras ---
+    // --- weight and other extras (a week's summary only gives its weight, never its averages) ---
     const extras = [];
-    for (const it of ordered) for (const e of it.extras || []) if (!extras.some((x) => x.label.toLowerCase() === e.label.toLowerCase())) extras.push(e);
+    for (const it of ordered) {
+      const week = v2(it) && it.r.screen === "period_summary";
+      for (const e of it.extras || []) {
+        if (week && !/weight/i.test(e.label)) continue;
+        if (/average|avg/i.test(e.label + " " + e.value)) continue;
+        if (!extras.some((x) => x.label.toLowerCase() === e.label.toLowerCase())) extras.push(e);
+      }
+    }
 
     // --- Shan's call on the day ---
     food.conf = conf;
@@ -314,16 +466,33 @@
       for (const k of Object.keys(include)) include[k] = false;
     }
     const level = food.kcal == null ? steps.conf : conf;
+    // what the averages leave out, in words
+    const kOut = food.kcal != null && !include.kcal;
+    const pOut = food.protein != null && !include.protein;
+    const sOut = steps.value != null && !include.steps;
+    const leftOut =
+      kOut && sOut ? "Food and steps left out of the averages"
+      : kOut ? "Left out of the averages"
+      : pOut && sOut ? "Protein, carbs, fat and steps left out of the averages"
+      : pOut ? "Protein, carbs and fat left out of the averages"
+      : sOut ? "Steps left out of the averages"
+      : "";
+    // counting the day can't fix macros that are missing food: only offer it where it would change something
+    const canCount = !opts.verdict && (kOut || sOut || (pOut && !food.floor));
     return {
       day,
       food,
       steps,
       extras,
+      demoted: [...demoted], // screenshots the reader took for a day total that are one meal's
+      mealIds: chosen.filter((m) => !m.fromDay && m.kcal != null).map((m) => m.itemId),
       notes,
       info,
       include,
       verdict: opts.verdict || null,
       level,
+      leftOut,
+      canCount,
       // what needs a look: anything the averages leave out
       flagged: (food.kcal != null && !include.kcal) || (food.protein != null && !include.protein) || (steps.value != null && !include.steps),
     };
@@ -372,6 +541,6 @@
     return n.replace(/^./, (c) => c.toLowerCase());
   }
 
-  const api = { reconcileDay, summarize, refKcal, isAlcohol, goalOf, median };
+  const api = { reconcileDay, summarize, refKcal, isAlcohol, goalOf, median, effDay, sessionSizes, ukParts };
   root.TSReconcile = api;
 })(typeof window !== "undefined" ? window : globalThis);

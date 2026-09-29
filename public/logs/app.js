@@ -272,85 +272,35 @@
   }
 
   // ---------- which day a screenshot belongs to ----------
-  // Priority: set by you > a date printed on the screenshot > when it was sent (from the file name or the photo)
-  // > when you shared it (only for small, nightly shares; a big batch shared later can't be dated that way).
-  function sessionSizes(items) {
-    const by = new Map();
+  // Worked out in reconcile.js (shared with the tests): set by you > a date printed on the screenshot > when it was
+  // sent (from the file name or the photo) > when you shared it (only for small, nightly shares).
+  const sessionSizes = (items) => window.TSReconcile.sessionSizes(items);
+  const effDay = (it, sizes) => window.TSReconcile.effDay(it, sizes);
+
+  function parseReadings(items) {
     for (const it of items) {
-      const k = it.batch || it.source;
-      if (!by.has(k)) by.set(k, []);
-      by.get(k).push(it);
-    }
-    const size = new Map();
-    for (const list of by.values()) {
-      list.sort((a, b) => a.received_at - b.received_at || a.id - b.id);
-      let start = 0;
-      for (let i = 1; i <= list.length; i++) {
-        if (i === list.length || list[i].received_at - list[i - 1].received_at > 600) {
-          for (let j = start; j < i; j++) size.set(list[j].id, i - start);
-          start = i;
+      if (it.rj !== undefined && !it._rp) {
+        try {
+          it.r = it.rj ? JSON.parse(it.rj) : null;
+        } catch {
+          it.r = null;
         }
+        it._rp = true;
       }
     }
-    return size;
-  }
-  function withYear(s, refT) {
-    const ref = ukParts(refT).date;
-    let iso = null;
-    if (/^\d{4}-\d{2}-\d{2}$/.test(s) && validISO(s) && Math.abs(daysBetween(s, ref)) <= 60) iso = s;
-    else if (/^\d{4}-\d{2}-\d{2}$/.test(s)) s = s.slice(5);
-    if (!iso && /^\d{2}-\d{2}$/.test(s)) {
-      const y = +ref.slice(0, 4);
-      iso = `${y}-${s}`;
-      if (validISO(iso) && iso > addDays(ref, 2)) iso = `${y - 1}-${s}`;
-    }
-    if (!iso || !validISO(iso)) return null;
-    if (iso > addDays(ref, 2) || iso < addDays(ref, -400)) return null;
-    return iso;
-  }
-  function effDay(it, sizes) {
-    if (it.day && it.day_src === "manual") return { day: it.day, src: "manual" };
-    const r = it.r || {};
-    let ref = null;
-    if (it.sent_at) ref = { t: it.sent_at, src: it.sent_src === "photo" ? "photo" : it.sent_src === "name_day" ? "sentday" : "sent" };
-    else if (it.source === "share" && (sizes.get(it.id) || 1) <= 4) ref = { t: it.received_at, src: "shared" };
-    if (r.date) {
-      const d = withYear(r.date, ref ? ref.t : it.received_at);
-      if (d) return { day: d, src: "screen" };
-    }
-    if (!ref) return { day: null, src: null };
-    const p = ukParts(ref.t);
-    let day = p.date;
-    const shown = String(r.date_shown || "").toLowerCase();
-    if (ref.src !== "sentday") {
-      const m = String(r.clock || "").match(/^(\d{2}):(\d{2})$/);
-      const clock = m ? +m[1] * 60 + +m[2] : null;
-      // screenshot clock well after the time it was sent or shared (more than 3 hours, so a client abroad
-      // doesn't count), so it was taken on an earlier day
-      if (clock != null && clock > p.min + 180) day = addDays(day, -1);
-      // sent in the small hours with no clock to go on: last night's log
-      else if (clock == null && p.hour < 4) day = addDays(day, -1);
-    }
-    if (/\byesterday\b/.test(shown)) day = addDays(day, -1);
-    else if (!/\btoday\b/.test(shown)) {
-      const wd = WD_LONG.findIndex((w) => new RegExp(`\\b(${w}|${w.slice(0, 3)})\\b`).test(shown));
-      if (wd >= 0) {
-        const cur = dObj(day).getUTCDay();
-        day = addDays(day, -((cur - wd + 7) % 7));
-      }
-    }
-    return { day, src: ref.src };
   }
   function recompute() {
+    parseReadings(S.data.items);
     const sizes = sessionSizes(S.data.items);
     const safe = (it) => {
       try {
         return effDay(it, sizes);
       } catch {
-        return { day: it.day_src === "manual" ? it.day : null, src: it.day_src === "manual" ? "manual" : null };
+        return { day: it.day_src === "manual" ? it.day : null, src: it.day_src === "manual" ? "manual" : null, t: it.received_at, clockMin: null, lag: null };
       }
     };
     S.eff = new Map(S.data.items.map((it) => [it.id, safe(it)]));
+    S.recCache = new Map();
   }
 
   // ---------- grouping ----------
@@ -365,15 +315,18 @@
   };
   const itemsFor = (cid, filed = false) =>
     S.data.items.filter((i) => (filed ? !!i.filed_at : !i.filed_at) && (cid === "later" ? i.client_id == null : i.client_id === cid));
-  function dayTotals(items) {
-    const t = { kcal: null, protein: null, carbs: null, fat: null, steps: null, extras: [] };
-    const mx = (a, b) => (a == null ? b : b == null ? a : Math.max(a, b));
-    for (const it of items) {
-      if (it.kind === "food" || it.kind === "food_steps") for (const k of ["kcal", "protein", "carbs", "fat"]) t[k] = mx(t[k], it[k]);
-      t.steps = mx(t.steps, it.steps);
-      for (const e of it.extras || []) if (!t.extras.some((x) => x.label.toLowerCase() === e.label.toLowerCase())) t.extras.push(e);
-    }
-    return t;
+  // A day's numbers come from TSReconcile (reconcile.js): the app's own day total when one was sent, else the
+  // meals added up, with a confidence and plain-words notes. The averages only use days it trusts.
+  const R = window.TSReconcile;
+  function refFor(cid) {
+    if (cid == null || cid === "later") return null;
+    const key = "ref:" + cid;
+    if (!S.recCache.has(key)) S.recCache.set(key, R.refKcal(S.data.items.filter((i) => i.client_id === cid), targetsFor(cid)));
+    return S.recCache.get(key);
+  }
+  const verdictsFor = (cid) => (cid != null && cid !== "later" && S.data.days && S.data.days[cid]) || {};
+  function totalsOf(rec) {
+    return { kcal: rec.food.kcal, protein: rec.food.protein, carbs: rec.food.carbs, fat: rec.food.fat, steps: rec.steps.value, extras: rec.extras };
   }
   function byDay(items) {
     const m = new Map();
@@ -386,9 +339,17 @@
         m.get(d).push(it);
       }
     }
+    const cid = items.length ? items[0].client_id : null;
+    const ref = refFor(cid);
+    const verdicts = verdictsFor(cid);
     const days = [...m.keys()].sort().map((day) => {
       const list = m.get(day).sort((a, b) => kindOrder(a) - kindOrder(b) || a.received_at - b.received_at || a.id - b.id);
-      return { day, items: list, totals: dayTotals(list) };
+      const withCap = list.map((it) => {
+        const e = S.eff.get(it.id) || {};
+        return { ...it, t: e.t, clockMin: e.clockMin, lag: e.lag };
+      });
+      const rec = R.reconcileDay(day, withCap, { refKcal: ref, verdict: verdicts[day] });
+      return { day, items: list, rec, totals: totalsOf(rec) };
     });
     return { days, undated };
   }
@@ -421,33 +382,84 @@
 
   const imgUrl = (it) => `${API}/logs/img/${it.id}?v=${encodeURIComponent(it.v || it.id)}`;
   const TAGK = { food: "Food", steps: "Steps", food_steps: "Food, steps", weight: "Weight", other: "Other" };
-  const thumbTag = (it) => {
+  // what a screenshot is, in a word or two (the new reader knows a day's total from one meal)
+  function shotWhat(it, rec) {
+    const r = it.r;
+    if (!r || !(r.v >= 2)) return null;
+    if (rec && rec.demoted.includes(it.id)) return "A meal";
+    if (r.screen === "day_summary") return "Day total";
+    if (r.screen === "meal") {
+      const m = (r.meals || [])[0];
+      return m && m.name ? m.name.replace(/^./, (c) => c.toUpperCase()) : "A meal";
+    }
+    if (r.screen === "diary_part") return "Meals";
+    if (r.screen === "food_item") return "One food";
+    if (r.screen === "period_summary") return "Week";
+    return null;
+  }
+  const thumbTag = (it, rec) => {
     if (it.status === "new") return `<span class="tag">Reading…</span>`;
     if (it.status === "failed") return `<span class="tag red">Not read</span>`;
+    const what = shotWhat(it, rec);
+    if (what && (it.kind === "food" || it.kind === "food_steps")) return `<span class="tag"><small>${esc(what)}</small>${it.kcal != null ? fmtN(it.kcal) + " kcal" : "no total"}</span>`;
+    if (what) return `<span class="tag">${esc(what)}</span>`;
     const k = TAGK[it.kind] || "Picture";
     if ((it.kind === "food" || it.kind === "food_steps") && it.kcal != null) return `<span class="tag"><small>${k}</small>${fmtN(it.kcal)} kcal</span>`;
     if (it.kind === "steps" && it.steps != null) return `<span class="tag"><small>${k}</small>${fmtN(it.steps)}</span>`;
     return `<span class="tag">${k}</span>`;
   };
-  function thumb(it) {
+  function thumb(it, rec) {
     const sel = S.sel && S.sel.has(it.id);
     const reading = it.status === "new" || S.reading.has(it.id);
     const label = `${KIND[it.kind] || "Screenshot"}${S.eff.get(it.id)?.day ? ", " + dayLabel(S.eff.get(it.id).day) : ""}`;
     return `<button class="thumb${sel ? " sel" : ""}" data-item="${it.id}" aria-label="${esc(label)}"${S.sel ? ` aria-pressed="${sel}"` : ""}>
       <img src="${imgUrl(it)}" loading="lazy" decoding="async" alt="">
-      ${thumbTag(it)}${reading ? `<span class="state"><i></i></span>` : ""}${S.sel ? `<span class="check">${ic("check")}</span>` : ""}
+      ${thumbTag(it, rec)}${reading ? `<span class="state"><i></i></span>` : ""}${S.sel ? `<span class="check">${ic("check")}</span>` : ""}
     </button>`;
   }
-  function numsLine(t, tg) {
+  // A day's numbers. Anything the averages leave out gets a "?" and the reason underneath, in words.
+  function numsLine(d, tg) {
+    const rec = d.rec;
+    const f = rec.food;
+    const inc = rec.include;
     const parts = [];
-    const mark = (k, v) => (hit[k] && hit[k](v, tg[k]) ? ` <span class="tgt-hit" aria-label="on target">✓</span>` : "");
-    if (t.kcal != null) parts.push(`<span><b class="num">${fmtN(t.kcal)}</b> kcal${mark("kcal", t.kcal)}</span>`);
-    if (t.protein != null) parts.push(`<span>P <b class="num">${fmtN(t.protein)}</b> g${mark("protein", t.protein)}</span>`);
-    if (t.carbs != null) parts.push(`<span>C <b class="num">${fmtN(t.carbs)}</b> g</span>`);
-    if (t.fat != null) parts.push(`<span>F <b class="num">${fmtN(t.fat)}</b> g</span>`);
-    if (t.steps != null) parts.push(`<span><b class="num">${fmtN(t.steps)}</b> steps${mark("steps", t.steps)}</span>`);
-    for (const e of (t.extras || []).slice(0, 3)) parts.push(`<span>${esc(e.label)} <b>${esc(e.value)}</b></span>`);
+    const mark = (k, v) => (inc[k] && hit[k] && hit[k](v, tg[k]) ? ` <span class="tgt-hit" aria-label="on target">✓</span>` : "");
+    const q = (k) => (inc[k] ? "" : ` <span class="q" aria-label="left out of the averages">?</span>`);
+    const cls = (k) => (inc[k] ? "" : ' class="out"');
+    if (f.kcal != null) parts.push(`<span${cls("kcal")}><b class="num">${fmtN(f.kcal)}</b> kcal${mark("kcal", f.kcal)}${q("kcal")}</span>`);
+    const plus = f.floor ? "+" : "";
+    if (f.protein != null) parts.push(`<span${cls("protein")}>P <b class="num">${fmtN(f.protein)}${plus}</b> g${mark("protein", f.protein)}${q("protein")}</span>`);
+    if (f.carbs != null) parts.push(`<span${cls("carbs")}>C <b class="num">${fmtN(f.carbs)}${plus}</b> g</span>`);
+    if (f.fat != null) parts.push(`<span${cls("fat")}>F <b class="num">${fmtN(f.fat)}${plus}</b> g</span>`);
+    const st = rec.steps;
+    if (st.value != null) parts.push(`<span${cls("steps")}>${st.approx ? "about " : ""}<b class="num">${fmtN(st.value)}</b> steps${mark("steps", st.value)}${q("steps")}</span>`);
+    for (const e of (rec.extras || []).slice(0, 3)) parts.push(`<span>${esc(e.label)} <b>${esc(e.value)}</b></span>`);
     return parts.length ? `<div class="nums">${parts.join("")}</div>` : `<div class="nums"><span class="none">No numbers read yet</span></div>`;
+  }
+  // How the day was put together, what's wrong with it, and Shan's say on whether it counts.
+  function dayStatus(d, cid) {
+    const rec = d.rec;
+    if (cid === "later" || cid == null) return "";
+    const lines = [];
+    for (const n of rec.notes) lines.push(`<li class="${rec.flagged ? "warn" : ""}">${ic(rec.flagged ? "alert" : "info")}<span>${esc(n)}</span></li>`);
+    if (rec.steps.note && rec.steps.conf === "low") lines.push(`<li class="warn">${ic("alert")}<span>Steps: ${esc(rec.steps.note)}</span></li>`);
+    for (const n of rec.info) lines.push(`<li class="muted">${ic("info")}<span>${esc(n)}</span></li>`);
+    let chip = "";
+    let act = "";
+    if (rec.verdict === "count") {
+      chip = `<span class="flag ok">Counted by you</span>`;
+      act = `<button class="linkish" data-verdict="" data-day="${d.day}">Undo</button>`;
+    } else if (rec.verdict === "omit") {
+      chip = `<span class="flag">Left out by you</span>`;
+      act = `<button class="linkish" data-verdict="" data-day="${d.day}">Undo</button>`;
+    } else if (rec.flagged) {
+      chip = `<span class="flag">${esc(rec.leftOut || "Left out of the averages")}</span>`;
+      if (rec.food.src !== "old" && rec.canCount) act = `<button class="linkish" data-verdict="count" data-day="${d.day}">Count it anyway</button>`;
+    } else if (rec.food.src === "meals") chip = `<span class="flag ok">Added up from meals</span>`;
+    else if (rec.food.src === "typed") chip = `<span class="flag ok">Typed by you</span>`;
+    if (!act && !rec.verdict && !rec.flagged && rec.food.kcal != null && (rec.notes.length || rec.food.src === "meals")) act = `<button class="linkish" data-verdict="omit" data-day="${d.day}">Leave it out</button>`;
+    if (!chip && !lines.length) return "";
+    return `<div class="daystat">${chip || act ? `<div class="ds-top">${chip}${act}</div>` : ""}${lines.length ? `<ul class="day-notes">${lines.join("")}</ul>` : ""}</div>`;
   }
   function uploadBanner() {
     if (!S.up) return "";
@@ -456,9 +468,16 @@
     return `<div class="banner" id="upBanner"><span class="spin"></span><div class="bar"><div style="margin-bottom:6px">Adding <b class="num" id="upDone">${u.done}</b> of ${u.total}${u.clientName ? ` for ${esc(firstName(u.clientName))}` : ""}</div><div class="progress"><i id="upBar" style="width:${pct}%"></i></div></div></div>`;
   }
   function readingBanner(items) {
+    const paused = items.filter((i) => limitPaused(i) && (i.status === "new" || needsRereadAny(i))).length;
+    if (paused || S.limitHit)
+      return `<div class="banner warn">${ic("alert")}<div>Reading is paused: today's free reading allowance is used up. It carries on by itself after 1am${paused ? ` (${plural(paused, "screenshot")} to go)` : ""}.</div></div>`;
     const n = items.filter((i) => i.status === "new").length;
-    return n ? `<div class="banner"><span class="spin"></span><div>Reading ${plural(n, "screenshot")}. You can carry on.</div></div>` : "";
+    const old = items.filter((i) => needsReread(i)).length;
+    if (n) return `<div class="banner"><span class="spin"></span><div>Reading ${plural(n, "screenshot")}. You can carry on.</div></div>`;
+    if (old) return `<div class="banner"><span class="spin"></span><div>Checking ${plural(old, "screenshot")} again with the new reader. Days marked "being read again" update as it goes.</div></div>`;
+    return "";
   }
+  const needsRereadAny = (i) => i.status === "read" && (i.rv || 1) < (S.data.reader || 1) && !i.filed_at;
 
   function viewHome() {
     const open = openItems();
@@ -538,12 +557,18 @@
         <div class="empty"><b>${isLater ? "All sorted" : "Nothing waiting"}</b><span>${isLater ? "Everything has a client." : `New screenshots for ${esc(firstName(nameOf(cid)))} will show up here.`}</span></div>
         ${doneBlock(cid, done)}`;
     }
-    const col = (k) => days.map((d) => d.totals[k]).filter((v) => v != null);
+    // averages only over the days the checks trust (or you counted); the rest are listed as left out
+    const sum = R.summarize(days.map((d) => d.rec));
     const stat = (label, k, unit) => {
-      const a = avg(col(k));
-      const n = col(k).length;
-      const hits = tg[k] ? days.filter((d) => hit[k](d.totals[k], tg[k])).length : null;
-      const sub = tg[k] ? `<small>Target ${fmtN(tg[k])}${unit}</small><small>Hit ${hits} of ${days.length}</small>` : `<small>${a == null ? "Not read yet" : `Avg of ${plural(n, "day")}`}</small>`;
+      const a = sum[k].avg;
+      const n = sum[k].n;
+      const left = sum[k].left.length;
+      const val = (d) => (k === "steps" ? d.rec.steps.value : d.rec.food[k]);
+      const hits = tg[k] ? days.filter((d) => d.rec.include[k] && hit[k](val(d), tg[k])).length : null;
+      const out = left ? `<small class="warn">${left} left out</small>` : "";
+      const sub = tg[k]
+        ? `<small>Target ${fmtN(tg[k])}${unit}</small><small>Hit ${hits} of ${n}</small>${out}`
+        : `<small>${a == null ? (left ? "No days to trust yet" : "Not read yet") : `Avg of ${plural(n, "day")}`}</small>${out}`;
       return `<div>${label}<b class="num">${a == null ? "–" : fmtN(a) + unit}</b>${sub}</div>`;
     };
     const range = days.length ? rangeShort(days[0].day, days[days.length - 1].day) : "No days yet";
@@ -581,7 +606,7 @@
               <p class="hint" style="padding:6px 0 12px">${
                 isLater ? "" : "The date isn't on these and they came in as a batch. Tap one to set its day, or select several and set the day in one go."
               }</p>
-              <div class="thumbs">${undated.map(thumb).join("")}</div>
+              <div class="thumbs">${undated.map((it) => thumb(it)).join("")}</div>
             </section>`
           : ""
       }
@@ -590,11 +615,12 @@
         .map((d, i) => {
           const srcs = [...new Set(d.items.map((it) => S.eff.get(it.id)?.src))];
           const guessy = srcs.some((s) => GUESSY.has(s));
-          return `<section class="daycard rise" style="--i:${Math.min(i + 2, 8)}">
+          return `<section class="daycard rise${d.rec.flagged && !d.rec.verdict ? " flagged" : ""}" style="--i:${Math.min(i + 2, 8)}">
             <div class="dh"><b>${dayLabel(d.day)}</b><span class="src">${plural(d.items.length, "screenshot")}</span></div>
             ${guessy ? `<div class="flags"><span class="flag">Day guessed, worth a check</span></div>` : ""}
-            ${numsLine(d.totals, tg)}
-            <div class="thumbs">${d.items.map(thumb).join("")}</div>
+            ${numsLine(d, tg)}
+            ${dayStatus(d, cid)}
+            <div class="thumbs">${d.items.map((it) => thumb(it, d.rec)).join("")}</div>
           </section>`;
         })
         .join("")}
@@ -669,12 +695,36 @@
     if (reading) status = `<div class="status-line">${ic("refresh")}<span>Reading it now. The numbers appear here when it's done.</span></div>`;
     else if (it.status === "failed")
       status = `<div class="status-line red">${ic("alert")}<span>Couldn't read this one. Try again, or type the numbers in.</span></div>`;
-    else
-      status = `<div class="status-line">${ic("info")}<span>${it.edited ? "Numbers edited by you." : `Read${it.app ? ` from ${esc(it.app)}` : ""}.`}${it.note ? ` ${esc(it.note)}` : ""}${
-        it.partial ? " The screenshot cuts off before the day's totals." : ""
-      }</span></div>`;
+    else {
+      const r = it.r || {};
+      const newer = r.v >= 2;
+      const what = !newer
+        ? ""
+        : r.screen === "day_summary"
+        ? " as the day's total"
+        : r.screen === "meal"
+        ? ` as one meal${(r.meals || [])[0] && r.meals[0].name ? ` (${esc(r.meals[0].name)})` : ""}, not the day's total`
+        : r.screen === "diary_part"
+        ? ` as part of the diary (${esc((r.meals || []).filter((m) => m.logged !== false).map((m) => m.name || "a meal").join(", ") || "meals")}), not the day's total`
+        : r.screen === "period_summary"
+        ? " as a summary of several days, so it isn't used for any one day's numbers"
+        : r.screen === "steps"
+        ? " as steps"
+        : "";
+      const bits = [];
+      bits.push(it.edited ? "Numbers edited by you." : `Read${it.app ? ` from ${esc(it.app)}` : ""}${what}.`);
+      if (it.note) bits.push(esc(it.note));
+      if (newer && r.fixes && r.fixes.length) bits.push(`Put right while reading: ${esc(r.fixes.slice(0, 2).join("; "))}.`);
+      if (!newer && it.status === "read") bits.push("Read by the old reader; it's being read again.");
+      status = `<div class="status-line">${ic("info")}<span>${bits.join(" ")}</span></div>`;
+      if (newer && r.unsure && r.unsure.length)
+        status += `<div class="status-line red">${ic("alert")}<span>Not sure of ${esc(r.unsure.map((f) => ({ kcal: "the calories", macros: "the macros", protein: "protein", carbs: "carbs", fat: "fat", steps: "steps" })[f] || "a number").join(" or "))}: the goal and what was eaten may be mixed up. Check the picture and type the right number.</span></div>`;
+      if (limitPaused(it)) status += `<div class="status-line">${ic("info")}<span>${esc(it.read_error)}</span></div>`;
+    }
     const v = (k) => (it[k] == null ? "" : it[k]);
     const clients = S.data.clients.filter((c) => !c.finished || c.id === it.client_id);
+    const autoScope = it.r && it.r.v >= 2 && ["meal", "diary_part", "food_item"].includes(it.r.screen) ? "meal" : "day";
+    const curScope = it.scope || autoScope;
     openSheet(
       e.day ? dayLabel(e.day) : "Screenshot",
       `<div class="form">
@@ -686,6 +736,9 @@
           <div class="field"><span class="lab">What it shows</span><div class="opts" id="kindOpts">
             ${Object.entries(KIND).map(([k, l]) => `<button type="button" class="opt${it.kind === k ? " on" : ""}" data-kind="${k}" aria-pressed="${it.kind === k}">${l}</button>`).join("")}
           </div></div>
+          <div class="field" id="scopeField"${it.kind === "food" || it.kind === "food_steps" ? "" : " hidden"}><span class="lab">These food numbers are for</span><div class="opts" id="scopeOpts">
+            ${[["day", "The whole day"], ["meal", "One meal"]].map(([k, l]) => `<button type="button" class="opt${curScope === k ? " on" : ""}" data-scope="${k}" aria-pressed="${curScope === k}">${l}</button>`).join("")}
+          </div><p class="hint">Meals are added up for days with no day-total screenshot. They're never added on top of a day's total.</p></div>
           <div class="two">
             <div class="field"><label for="it-kcal">Calories</label><input id="it-kcal" name="kcal" inputmode="numeric" value="${v("kcal")}" placeholder="None"></div>
             <div class="field"><label for="it-protein">Protein g</label><input id="it-protein" name="protein" inputmode="decimal" value="${v("protein")}" placeholder="None"></div>
@@ -710,11 +763,22 @@
       </div>`,
       (sh) => {
         let kind = it.kind;
+        let scope = curScope;
         $("#kindOpts", sh).onclick = (ev) => {
           const b = ev.target.closest("[data-kind]");
           if (!b) return;
           kind = b.dataset.kind;
           $$("[data-kind]", sh).forEach((x) => {
+            x.classList.toggle("on", x === b);
+            x.setAttribute("aria-pressed", x === b);
+          });
+          $("#scopeField", sh).hidden = !(kind === "food" || kind === "food_steps");
+        };
+        $("#scopeOpts", sh).onclick = (ev) => {
+          const b = ev.target.closest("[data-scope]");
+          if (!b) return;
+          scope = b.dataset.scope;
+          $$("[data-scope]", sh).forEach((x) => {
             x.classList.toggle("on", x === b);
             x.setAttribute("aria-pressed", x === b);
           });
@@ -735,6 +799,7 @@
             if ((nv ?? null) !== (it[k] ?? null)) body[k] = nv;
           }
           if (kind !== it.kind && kind) body.kind = kind;
+          if (scope !== curScope) body.scope = scope === autoScope && !it.scope ? null : scope;
           const cv = f.get("client");
           const newClient = cv === "later" ? null : Number(cv);
           if (newClient !== (it.client_id ?? null)) body.client_id = newClient ?? "later";
@@ -1000,24 +1065,31 @@
   }
 
   // ---------- reading ----------
-  // The server reads each screenshot as it arrives. Anything still waiting after a bit gets read from here.
+  // The server reads each screenshot as it arrives. Anything still waiting after a bit gets read from here, and so
+  // does anything read by an older version of the reader (the numbers stay as they were until the new reading is in).
+  const limitPaused = (i) => /allowance/i.test(i.read_error || "");
+  const needsReread = (i) => i.status === "read" && (i.rv || 1) < (S.data.reader || 1) && !i.filed_at && !limitPaused(i) && (i.read_tries || 0) < 6;
   let readTimer = null;
   let readSince = 0;
   function readLoop() {
     clearTimeout(readTimer);
     readSince = Date.now();
     const tick = async () => {
-      if (!S.data) return;
+      if (!S.data || S.limitHit) return;
       const skew = S.data.now - S.syncedAt / 1000;
       const now = Date.now() / 1000 + skew;
-      const waiting = openItems().filter((i) => i.status === "new");
-      if (!waiting.length || Date.now() - readSince > 8 * 60000) return;
-      const stale = waiting.filter((i) => now - i.received_at > 40 && !S.reading.has(i.id)).slice(0, 2);
-      await Promise.all(stale.map((it) => readNow(it, false)));
+      const waiting = openItems().filter((i) => i.status === "new" && !limitPaused(i));
+      const old = S.clientId && S.clientId !== "later" ? openItems().filter((i) => needsReread(i) && i.client_id === S.clientId) : [];
+      const others = openItems().filter((i) => needsReread(i) && i.client_id !== S.clientId);
+      if ((!waiting.length && !old.length && !others.length) || Date.now() - readSince > 25 * 60000) return rerender();
+      const next = waiting.filter((i) => now - i.received_at > 40 && !S.reading.has(i.id)).slice(0, 2);
+      if (!next.length) next.push(...old.concat(others).filter((i) => !S.reading.has(i.id)).slice(0, 2));
+      await Promise.all(next.map((it) => readNow(it, false)));
+      if (next.some((it) => limitPaused(S.data.items.find((x) => x.id === it.id) || {}))) S.limitHit = true;
       await refresh(true);
-      readTimer = setTimeout(tick, 4000);
+      readTimer = setTimeout(tick, next.length ? 1500 : 4000);
     };
-    readTimer = setTimeout(tick, 3500);
+    readTimer = setTimeout(tick, 2500);
   }
   async function readNow(it, loud) {
     S.reading.add(it.id);
@@ -1728,6 +1800,20 @@
       }
       return openItem(id);
     }
+    const vd = e.target.closest("[data-verdict]");
+    if (vd && root().contains(vd)) {
+      const day = vd.dataset.day;
+      const verdict = vd.dataset.verdict || null;
+      try {
+        const r = await api("/logs/days", { method: "POST", body: { client_id: S.clientId, day, verdict } });
+        setData(r.state);
+        rerender();
+        toast(verdict === "count" ? `${dayLabel(day)} now counts in the averages` : verdict === "omit" ? `${dayLabel(day)} left out of the averages` : "Back to how it was read");
+      } catch (err) {
+        fail(err);
+      }
+      return;
+    }
     const cl = e.target.closest("[data-client]");
     if (cl && root().contains(cl)) {
       S.view = "client";
@@ -1816,7 +1902,7 @@
       if (s.locked) return renderLock();
       S.session = s;
       await refresh(true);
-      if (openItems().some((i) => i.status === "new")) readLoop();
+      if (openItems().some((i) => i.status === "new" || needsReread(i))) readLoop();
     } catch {}
   });
   setInterval(async () => {
@@ -1842,7 +1928,7 @@
       setData(await api("/logs/state"));
       S.lastSync = Date.now();
       render("fade");
-      if (openItems().some((i) => i.status === "new")) readLoop();
+      if (openItems().some((i) => i.status === "new" || needsReread(i))) readLoop();
     } catch (e) {
       if (e.silent) return;
       root().innerHTML = `<div class="lock-screen"><div class="logo-mark big">${LOGO}</div><h1>Can't connect</h1><p>${esc(e.message)}</p><button class="btn lime" id="retry">Try again</button></div>`;

@@ -64,6 +64,22 @@
     while (t.length > 1 && textW(t + "…", bold, size) > maxW) t = t.slice(0, -1);
     return t.trimEnd() + "…";
   }
+  // split text into lines that fit maxW
+  function wrap(s, bold, size, maxW) {
+    const words = String(s).split(/\s+/);
+    const lines = [];
+    let cur = "";
+    for (const w of words) {
+      const t = cur ? cur + " " + w : w;
+      if (textW(t, bold, size) <= maxW || !cur) cur = t;
+      else {
+        lines.push(cur);
+        cur = w;
+      }
+    }
+    if (cur) lines.push(cur);
+    return lines;
+  }
   const rgb = (hex) => {
     const v = parseInt(hex.slice(1), 16);
     return [(v >> 16) & 255, (v >> 8) & 255, v & 255].map((c) => n2(c / 255)).join(" ");
@@ -246,10 +262,44 @@
   const compact = (v) => (v >= 10000 ? `${n2(v / 1000)}k` : Math.round(v).toLocaleString("en-GB"));
 
   // ---------- the log ----------
-  // opts: { clientName, from, to, days: [{day, totals, items}], undated: [items], targets, madeOn, loadImage(item) -> {bytes,w,h}, onProgress(done,total) }
+  // Short words for the Check column: why a day is left out of the averages, or how it was put together.
+  function checkWord(rec) {
+    if (!rec) return "";
+    if (rec.verdict === "count") return "Counted by you";
+    if (rec.verdict === "omit") return "Left out by you";
+    const f = rec.food;
+    if (f.src === "old") return "Being read again";
+    const inc = rec.include;
+    const foodOut = f.kcal != null && !inc.kcal;
+    const macroOut = f.protein != null && !inc.protein;
+    if (foodOut) return rec.notes.find((n) => !/^Added up/.test(n)) || rec.notes[0] || "Left out";
+    if (macroOut && f.floor) return `${Math.round(f.missingMacroKcal).toLocaleString("en-GB")} kcal with no macros`;
+    if (macroOut) return "Macros unsure";
+    if (rec.steps.value != null && !inc.steps) return "Steps taken early";
+    if (f.src === "meals") return `Added up from ${f.meals.length} meal${f.meals.length === 1 ? "" : "s"}`;
+    if (f.src === "typed") return "Typed by you";
+    return "";
+  }
+  // One line for the top of each day's screenshots: how its numbers were put together.
+  function dayHow(rec) {
+    if (!rec) return "";
+    const f = rec.food;
+    const parts = [];
+    if (rec.verdict === "count") parts.push("Counted in the averages by you");
+    else if (rec.verdict === "omit") parts.push("Left out of the averages by you");
+    else if (rec.flagged) parts.push(rec.leftOut || "Left out of the averages");
+    if (f.src === "total") parts.push(rec.info.includes("Day total matches the meal screenshots") ? "Day total from the app, matches the meal screenshots" : "Day total from the app");
+    for (const n of rec.notes) parts.push(n);
+    for (const n of rec.info) if (n !== "Day total matches the meal screenshots") parts.push(n);
+    return parts.join(". ") + (parts.length ? "." : "");
+  }
+
+  // opts: { clientName, from, to, days: [{day, totals, items, rec}], summary (TSReconcile.summarize), undated: [items], targets, madeOn,
+  //   loadImage(item) -> {bytes,w,h}, onProgress(done,total) }
   async function build(opts) {
     const d = new Doc();
     const { clientName, days, undated = [], targets = {}, madeOn } = opts;
+    const summary = opts.summary || null;
     const range = rangeLabel(opts.from, opts.to);
     const T = { kcal: targets.kcal || null, protein: targets.protein || null, steps: targets.steps || null };
     const hitK = (v) => T.kcal && v != null && Math.abs(v - T.kcal) <= T.kcal * 0.1;
@@ -257,7 +307,10 @@
     const hitS = (v) => T.steps && v != null && v >= T.steps;
     const nDays = days.length;
     const shots = days.reduce((a, x) => a + x.items.length, 0) + undated.length;
-    const col = (k) => days.map((x) => x.totals[k]).filter((v) => v != null);
+    // a day's number counts in the averages only if the checks trust it (or you counted the day)
+    const counts = (x, k) => (x.rec ? !!x.rec.include[k] : x.totals[k] != null);
+    const col = (k) => days.filter((x) => x.totals[k] != null && counts(x, k)).map((x) => x.totals[k]);
+    const leftOut = (k) => days.filter((x) => x.totals[k] != null && !counts(x, k));
 
     // ----- page 1: summary -----
     d.addPage();
@@ -272,31 +325,35 @@
     const aK = avg(col("kcal"));
     const aP = avg(col("protein"));
     const aS = avg(col("steps"));
-    const countHits = (k, f) => days.filter((x) => f(x.totals[k])).length;
-    tiles.push({
-      k: "Average calories",
-      v: aK == null ? "No data" : `${fmt(aK)} kcal`,
-      s: T.kcal ? `Target ${fmt(T.kcal)} · hit ${countHits("kcal", hitK)}/${nDays}` : aK == null ? "Nothing read yet" : `Across ${col("kcal").length} of ${nDays} days`,
-    });
-    tiles.push({
-      k: "Average protein",
-      v: aP == null ? "No data" : `${fmt(aP)} g`,
-      s: T.protein ? `Target ${fmt(T.protein)} g · hit ${countHits("protein", hitP)}/${nDays}` : aP == null ? "Nothing read yet" : `Across ${col("protein").length} of ${nDays} days`,
-    });
-    tiles.push({
-      k: "Average steps",
-      v: aS == null ? "No data" : fmt(aS),
-      s: T.steps ? `Target ${fmt(T.steps)} · hit ${countHits("steps", hitS)}/${nDays}` : aS == null ? "Nothing read yet" : `Across ${col("steps").length} of ${nDays} days`,
-    });
+    const countHits = (k, f) => days.filter((x) => counts(x, k) && f(x.totals[k])).length;
+    const basis = (k) => {
+      const n = col(k).length;
+      const l = leftOut(k).length;
+      return { a: `Based on ${n} day${n === 1 ? "" : "s"}`, b: l ? `${l} left out, see Check` : "None left out" };
+    };
+    const tile = (k, label, unit, T0, hitF) => {
+      const a = avg(col(k));
+      const b = basis(k);
+      tiles.push({
+        k: label,
+        v: a == null ? "No data" : `${fmt(a)}${unit}`,
+        s: T0 ? `Target ${fmt(T0)}${unit} · hit ${countHits(k, hitF)}/${col(k).length}` : a == null ? (leftOut(k).length ? "No day to trust" : "Nothing read yet") : b.a,
+        s2: a == null && !leftOut(k).length ? "" : T0 ? b.a + " · " + b.b.replace(", see Check", "") : b.b,
+      });
+    };
+    tile("kcal", "Average calories", " kcal", T.kcal, hitK);
+    tile("protein", "Average protein", " g", T.protein, hitP);
+    tile("steps", "Average steps", "", T.steps, hitS);
     const logged = days.filter((x) => x.items.length).length;
-    tiles.push({ k: "Days logged", v: `${logged} of ${nDays}`, s: `${shots} screenshot${shots === 1 ? "" : "s"}` });
+    tiles.push({ k: "Days logged", v: `${logged} of ${nDays}`, s: `${shots} screenshot${shots === 1 ? "" : "s"}`, s2: "" });
     const tw = (PW - 2 * M - 3 * 10) / 4;
     tiles.forEach((t, i) => {
       const x = M + i * (tw + 10);
-      d.rrect(x, 156, tw, 74, 8, TILE);
-      d.text(t.k, x + 10, 174, { size: 8.5, color: INK2 });
-      d.text(fit(t.v, true, 17, tw - 20), x + 10, 198, { size: 17, bold: true });
-      d.text(fit(t.s, false, 7.8, tw - 20), x + 10, 218, { size: 7.8, color: INK2 });
+      d.rrect(x, 150, tw, 84, 8, TILE);
+      d.text(t.k, x + 10, 168, { size: 8.5, color: INK2 });
+      d.text(fit(t.v, true, 17, tw - 20), x + 10, 192, { size: 17, bold: true });
+      d.text(fit(t.s, false, 7.8, tw - 20), x + 10, 211, { size: 7.8, color: INK2 });
+      if (t.s2) d.text(fit(t.s2, false, 7.8, tw - 20), x + 10, 223, { size: 7.8, color: INK2 });
     });
 
     // charts: one measure each, never two scales on one chart
@@ -311,6 +368,7 @@
         d.line(x + w - lw - 20, y0 + 7, x + w - lw - 5, y0 + 7, INK, 1);
       }
       const vals = days.map((x2) => x2.totals[key]);
+      const ok = days.map((x2) => counts(x2, key));
       const have = vals.filter((v) => v != null);
       if (!have.length) {
         d.text("No numbers read for these days", x, y0 + 34, { size: 8.5, color: INK2 });
@@ -334,7 +392,8 @@
         const cx = left + band * i + band / 2;
         if (v != null && v > 0) {
           const bh = Math.max(1.5, (v / max) * ph);
-          d.rrect(cx - bw / 2, bottom - bh, bw, bh, Math.min(3, bw / 2, bh), ORANGE, [1, 1, 0, 0]);
+          if (ok[i]) d.rrect(cx - bw / 2, bottom - bh, bw, bh, Math.min(3, bw / 2, bh), ORANGE, [1, 1, 0, 0]);
+          else d.rrectStroke(cx - bw / 2 + 0.5, bottom - bh + 0.5, bw - 1, bh - 0.5, Math.min(3, bw / 2, bh), ORANGE, 1); // left out: outline only
         }
         if (i % every === 0) d.text(vals.length > 10 ? String(dObj(days[i].day).getUTCDate()) : shortDay(days[i].day), cx, bottom + 11, { size: 6.8, color: INK2, align: "center" });
       });
@@ -346,16 +405,22 @@
     const cw = (PW - 2 * M - 24) / 2;
     chart(M, y, cw, 150, "Calories eaten", "kcal", T.kcal);
     chart(M + cw + 24, y, cw, 150, "Steps", "steps", T.steps);
-    y += 176;
+    y += 160;
+    if (leftOut("kcal").length || leftOut("steps").length) {
+      d.rrectStroke(M, y - 6.5, 8, 7, 1.5, ORANGE, 1);
+      d.text("Outlined bars: days left out of the averages (see the Check column)", M + 13, y, { size: 7.6, color: INK2 });
+    }
+    y += 16;
 
     // day table
     const cols = [
-      { k: "day", t: "Day", w: 118, align: "left" },
-      { k: "kcal", t: "Calories", w: 81, hit: hitK },
-      { k: "protein", t: "Protein g", w: 81, hit: hitP },
-      { k: "carbs", t: "Carbs g", w: 81 },
-      { k: "fat", t: "Fat g", w: 81 },
-      { k: "steps", t: "Steps", w: 81.28, hit: hitS },
+      { k: "day", t: "Day", w: 80, align: "left" },
+      { k: "kcal", t: "Calories", w: 64, hit: hitK },
+      { k: "protein", t: "Protein g", w: 62, hit: hitP },
+      { k: "carbs", t: "Carbs g", w: 54 },
+      { k: "fat", t: "Fat g", w: 46 },
+      { k: "steps", t: "Steps", w: 60, hit: hitS },
+      { k: "check", t: "Check", w: 157.28, align: "left" },
     ];
     const drawHead = (yy) => {
       let x = M;
@@ -366,14 +431,21 @@
       }
       return yy + 18;
     };
-    const drawRow = (yy, label, t, bold) => {
+    // left-out numbers are grey with a ? after them; the Check column says why
+    const drawRow = (yy, label, t, bold, row) => {
       let x = M;
+      const rec = row && row.rec;
       for (const c of cols) {
         if (c.k === "day") d.text(label, x + 8, yy, { size: 9.2, bold });
-        else {
+        else if (c.k === "check") {
+          if (rec) d.text(fit(checkWord(rec), false, 7.6, c.w - 10), x + 8, yy, { size: 7.6, color: rec.flagged && !rec.verdict ? INK : INK2 });
+        } else {
           const v = t[c.k];
-          d.text(fmt(v), x + c.w - 14, yy, { size: 9.2, bold, color: v == null ? INK2 : INK, align: "right" });
-          if (!bold && c.hit && c.hit(v)) d.tick(x + c.w - 11, yy - 7.4, 8, INK);
+          const out = row && v != null && !counts(row, c.k);
+          const floor = rec && rec.food.floor && ["protein", "carbs", "fat"].includes(c.k) && v != null;
+          const txt = v == null ? "–" : fmt(v) + (floor ? "+" : "") + (out ? "?" : "");
+          d.text(txt, x + c.w - (out ? 8 : 14), yy, { size: 9.2, bold, color: v == null || out ? INK2 : INK, align: "right" });
+          if (!bold && !out && c.hit && c.hit(v)) d.tick(x + c.w - 11, yy - 7.4, 8, INK);
         }
         x += c.w;
       }
@@ -389,16 +461,36 @@
         d.addPage();
         y = drawHead(M + 16);
       }
-      y = drawRow(y, dayLabel(x.day), x.totals, false);
+      y = drawRow(y, dayLabel(x.day), x.totals, false, x);
     }
     const avgs = { kcal: aK, protein: avg(col("protein")), carbs: avg(col("carbs")), fat: avg(col("fat")), steps: aS };
     if (y > bottomLimit) {
       d.addPage();
       y = drawHead(M + 16);
     }
-    y = drawRow(y, "Average", avgs, true);
+    y = drawRow(y, "Average", avgs, true, null);
     y += 6;
     const notes = [];
+    notes.push({ t: "How each day's food is worked out: the app's own day total when one was sent (meal screenshots only check it); otherwise the day's meal screenshots are added up, once each. Numbers are read automatically from the screenshots, which follow day by day." });
+    const lo = (k) => leftOut(k);
+    const dayList = (xs) => xs.map((x) => `${shortDay(x.day)} ${MON[dObj(x.day).getUTCMonth()]}`).join(", ");
+    const why = (k) => {
+      const xs = lo(k);
+      if (!xs.length) return "";
+      return xs.map((x) => `${shortDay(x.day)} ${MON[dObj(x.day).getUTCMonth()]} (${(checkWord(x.rec) || "not sure of it").replace(/^./, (c) => c.toLowerCase())})`).join("; ");
+    };
+    const avgParts = [];
+    if (col("kcal").length || lo("kcal").length) avgParts.push(`calories use ${col("kcal").length} of ${col("kcal").length + lo("kcal").length} days`);
+    if (col("protein").length || lo("protein").length) avgParts.push(`protein ${col("protein").length} of ${col("protein").length + lo("protein").length}`);
+    if (col("steps").length || lo("steps").length) avgParts.push(`steps ${col("steps").length} of ${col("steps").length + lo("steps").length}`);
+    if (lo("kcal").length || lo("protein").length || lo("steps").length) {
+      notes.push({ t: `Averages only use days the checks trust (or you counted): ${avgParts.join(", ")}. A number with a ? was left out; a number with a + is too low because some food was logged without macros.` });
+      if (lo("kcal").length) notes.push({ t: `Calories left out: ${why("kcal")}.` });
+      const pOnly = lo("protein").filter((x) => !lo("kcal").includes(x));
+      if (pOnly.length) notes.push({ t: `Protein, carbs and fat also left out: ${dayList(pOnly)} (${pOnly.every((x) => x.rec && x.rec.food.floor) ? "food logged with no macros" : "macros not certain"}).` });
+      const sOnly = lo("steps");
+      if (sOnly.length) notes.push({ t: `Steps left out: ${why("steps")}.` });
+    }
     if (T.kcal || T.protein || T.steps) {
       const parts = [];
       if (T.kcal) parts.push(`calories within 10% of ${fmt(T.kcal)}`);
@@ -406,20 +498,21 @@
       if (T.steps) parts.push(`steps ${fmt(T.steps)} or more`);
       notes.push({ tick: true, t: `On target: ${parts.join(", ")}.` });
     }
-    notes.push({ t: "Numbers are read automatically from the screenshots, which follow day by day." });
     if (undated.length) notes.push({ t: `${undated.length} screenshot${undated.length === 1 ? " has" : "s have"} no day set and ${undated.length === 1 ? "is" : "are"} at the end.` });
     for (const nt of notes) {
-      if (y > bottomLimit) {
-        d.addPage();
-        y = M + 16;
+      const lines = wrap(nt.t, false, 8.2, PW - 2 * M - 12);
+      for (let li = 0; li < lines.length; li++) {
+        if (y > bottomLimit) {
+          d.addPage();
+          y = M + 16;
+        }
+        let x = M;
+        if (nt.tick && li === 0) d.tick(x, y - 7.2, 8, INK);
+        if (nt.tick) x += 12;
+        d.text(lines[li], x, y, { size: 8.2, color: INK2 });
+        y += 11.5;
       }
-      let x = M;
-      if (nt.tick) {
-        d.tick(x, y - 7.2, 8, INK);
-        x += 12;
-      }
-      d.text(fit(nt.t, false, 8.2, PW - 2 * M - 12), x, y, { size: 8.2, color: INK2 });
-      y += 13;
+      y += 3;
     }
 
     // ----- screenshots, day by day -----
@@ -427,24 +520,36 @@
     const gap = 14;
     const cellW = (PW - 2 * M - gap * (colsN - 1)) / colsN;
     const maxH = 282; // two days of screenshots fit on a page
-    const groups = days.filter((x) => x.items.length).map((x) => ({ title: dayLabel(x.day), totals: x.totals, items: x.items }));
+    const groups = days.filter((x) => x.items.length).map((x) => ({ title: dayLabel(x.day), totals: x.totals, items: x.items, rec: x.rec }));
     if (undated.length) groups.push({ title: "No day set", totals: null, items: undated });
     let done = 0;
     const totalImgs = groups.reduce((a, g) => a + g.items.length, 0);
     const kindLabel = { food: "Food", steps: "Steps", food_steps: "Food and steps", weight: "Weight", other: "Other" };
-    const caption = (it) => {
+    // what each screenshot is: the day's total, one meal, steps...
+    const caption = (it, rec) => {
+      const r = it.r;
+      const isFood = it.kind === "food" || it.kind === "food_steps";
+      if (r && r.v >= 2) {
+        const m = (r.meals || [])[0];
+        const what =
+          rec && rec.demoted.includes(it.id) ? "A meal" : r.screen === "day_summary" ? "Day total" : r.screen === "meal" ? (m && m.name) || "A meal" : r.screen === "diary_part" ? "Meals" : r.screen === "period_summary" ? "Week" : r.screen === "food_item" ? "One food" : null;
+        if (what && isFood) return it.kcal != null ? `${what} · ${fmt(it.kcal)} kcal` : what;
+        if (what) return what;
+      }
       const k = kindLabel[it.kind] || "Screenshot";
-      if ((it.kind === "food" || it.kind === "food_steps") && it.kcal != null) return `${k} · ${fmt(it.kcal)} kcal`;
+      if (isFood && it.kcal != null) return `${k} · ${fmt(it.kcal)} kcal`;
       if (it.kind === "steps" && it.steps != null) return `${k} · ${fmt(it.steps)}`;
       return k;
     };
-    const totalsLine = (t) => {
+    const totalsLine = (t, rec) => {
       if (!t) return "";
       const p = [];
-      if (t.kcal != null) p.push(`${fmt(t.kcal)} kcal`);
-      const mac = [t.protein != null ? `P ${fmt(t.protein)} g` : null, t.carbs != null ? `C ${fmt(t.carbs)} g` : null, t.fat != null ? `F ${fmt(t.fat)} g` : null].filter(Boolean);
+      const q = (k) => (rec && t[k] != null && !rec.include[k] ? "?" : "");
+      const plus = rec && rec.food.floor ? "+" : "";
+      if (t.kcal != null) p.push(`${fmt(t.kcal)}${q("kcal")} kcal`);
+      const mac = [t.protein != null ? `P ${fmt(t.protein)}${plus}${q("protein")} g` : null, t.carbs != null ? `C ${fmt(t.carbs)}${plus} g` : null, t.fat != null ? `F ${fmt(t.fat)}${plus} g` : null].filter(Boolean);
       if (mac.length) p.push(mac.join("  "));
-      if (t.steps != null) p.push(`${fmt(t.steps)} steps`);
+      if (t.steps != null) p.push(`${rec && rec.steps.approx ? "about " : ""}${fmt(t.steps)}${q("steps")} steps`);
       for (const e of (t.extras || []).slice(0, 2)) p.push(`${e.label} ${e.value}`);
       return p.join(" · ");
     };
@@ -474,7 +579,8 @@
           sized.push({ it, img, w: img.w * s, h: img.h * s });
         }
         const rowH = Math.max(...sized.map((s) => s.h)) + 16;
-        const headH = first ? 36 : 0;
+        const how = first ? wrap(dayHow(g.rec), false, 8, PW - 2 * M).slice(0, 3) : [];
+        const headH = first ? 36 + how.length * 10.5 : 0;
         if (y + headH + rowH > PH - M - 22) {
           d.addPage();
           y = M + 4;
@@ -485,8 +591,9 @@
         }
         if (first) {
           d.text(g.title, M, y + 12, { size: 12.5, bold: true });
-          if (g.totals) d.text(fit(totalsLine(g.totals), false, 8.6, PW - 2 * M), M, y + 26, { size: 8.6, color: INK2 });
-          y += 36;
+          if (g.totals) d.text(fit(totalsLine(g.totals, g.rec), false, 8.6, PW - 2 * M), M, y + 26, { size: 8.6, color: INK2 });
+          how.forEach((ln, li) => d.text(ln, M, y + 38 + li * 10.5, { size: 8, color: g.rec && g.rec.flagged && !g.rec.verdict ? INK : INK2 }));
+          y += 36 + how.length * 10.5;
           first = false;
         }
         sized.forEach((s, i) => {
@@ -499,7 +606,7 @@
             d.rrect(x, y, s.w, s.h, 6, TILE);
             d.text("Couldn't load this one", x + s.w / 2, y + s.h / 2 + 3, { size: 8, color: INK2, align: "center" });
           }
-          d.text(fit(caption(s.it), false, 7.6, cellW), M + i * (cellW + gap) + cellW / 2, y + s.h + 10, { size: 7.6, color: INK2, align: "center" });
+          d.text(fit(caption(s.it, g.rec), false, 7.6, cellW), M + i * (cellW + gap) + cellW / 2, y + s.h + 10, { size: 7.6, color: INK2, align: "center" });
         });
         y += rowH + 8;
       }
@@ -540,5 +647,5 @@
     return `${safe} log${r ? " " + r : ""}.pdf`;
   };
 
-  window.TSLogPDF = { build, fileName, rangeLabel, dayLabel, winAnsi, textW };
+  window.TSLogPDF = { build, fileName, rangeLabel, dayLabel, winAnsi, textW, checkWord };
 })();

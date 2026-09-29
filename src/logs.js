@@ -492,7 +492,6 @@ const pub = (r) => ({
   status: r.status,
   read_error: r.read_error,
   read_tries: r.read_tries,
-  r: oldR(r.reading), // TEMPORARY: what app versions before reader 2 expect; goes once the new app is out
   rj: r.reading || null, // parsed in the app (keeps the Worker's CPU down)
   rv: r.rv || 1,
   scope: r.scope || null,
@@ -513,10 +512,6 @@ const pub = (r) => ({
   filed_at: r.filed_at,
   v: String(r.sha || "").slice(0, 12),
 });
-function oldR(reading) {
-  const o = safeJSON(reading, null);
-  return o ? { date_shown: o.date_shown || null, date: o.date || null, clock: o.clock || null } : null;
-}
 async function itemById(db, id) {
   const r = await db.prepare("SELECT * FROM logs_items WHERE id = ?").bind(id).first();
   return r ? pub(r) : null;
@@ -888,7 +883,7 @@ export async function logsCron(env, ctx) {
 }
 
 const CRON_READS = 20;
-const REREAD_OLD = false; // switched on once the new reader has been checked against real screenshots
+const REREAD_OLD = true; // screenshots read by an older reader are read again, a few each hour
 // Each read runs as its own invocation (ctx.exports.Reader, a loopback to this Worker) so one hourly run can
 // read 20 pictures without going over the per-invocation CPU limit. Stops early if the day's AI allowance runs out.
 // background: each read carries on in its own invocation after answering straight away (for callers that can't wait).
