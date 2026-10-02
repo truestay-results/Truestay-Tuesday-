@@ -1001,3 +1001,79 @@ button.tile:disabled:active { transform: none; }
 .gm-bar { display: block; height: 6px; border-radius: 999px; background: var(--surface-2); margin: 8px 0 6px; overflow: hidden; }
 .gm-bar i { display: block; height: 100%; border-radius: inherit; background: var(--ink); }
 .gm-sub { font-size: 13px; color: var(--muted); }
+
+/* ===================== v6: didn't pay (money lost, not owed) ===================== */
+/* Overdue is red because it needs doing. Didn't pay is settled, so it's quiet: grey, crossed out, an x,
+   and always the words "Didn't pay". Only the charts use a soft red for the lost share of what was expected. */
+.st-missed { --st: var(--line-2); }
+.prow.st-missed .amt { color: var(--muted); text-decoration: line-through; text-decoration-thickness: 1.5px; }
+.pt tr.st-missed td.n { color: var(--muted); text-decoration: line-through; }
+.pill.missed { background: var(--surface-2); color: var(--ink-2); box-shadow: inset 0 0 0 1px var(--line-2); }
+.pill.missed::before { background: var(--muted); }
+.paydone.lost { background: var(--surface-2); color: var(--muted); }
+.status-card.missed { background: var(--surface-2); }
+.status-card.missed .paydone { width: 40px; height: 40px; }
+.coin.missed { background: var(--card-3); color: var(--on-card); text-decoration: line-through; }
+.cal-legend i.lost { background: var(--card-3); }
+
+/* month strip: [lost][still to come][received], stacked */
+.mpill .bar:not(:last-child) { border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
+.mpill .bar:not(:first-child) { border-top-left-radius: 0; border-top-right-radius: 0; }
+.mpill .bar.lost { background: rgba(233, 72, 60, .55); min-height: 3px; }
+.mpill.sel .bar.lost { background: #FF7A6E; }
+
+/* hero bar: collected from the left, lost at the right end, what's still to come in between */
+.progress .lostbar {
+  position: absolute; top: 0; bottom: 0; right: 0; border-radius: 0 17px 17px 0;
+  background: repeating-linear-gradient(135deg, rgba(255, 122, 110, .95) 0 3px, rgba(255, 122, 110, .45) 3px 7px);
+}
+.progress-legend .lost { color: #FF9187; }
+
+.lost-line {
+  display: flex; align-items: center; gap: 12px; width: 100%; text-align: left;
+  margin-top: 10px; padding: 12px 14px; border-radius: var(--r-md);
+  background: var(--surface); border: 1px solid var(--line); color: var(--ink-2); font-size: 14px;
+}
+.lost-line b { color: var(--ink); font-weight: 600; font-size: 15px; }
+.lost-line .dot { width: 32px; height: 32px; border-radius: 50%; background: var(--surface-2); color: var(--red-ink); display: grid; place-items: center; flex: 0 0 auto; }
+.lost-line .dot svg { width: 16px; height: 16px; }
+.lost-line .go { margin-left: auto; color: var(--muted); }
+.lost-line .go svg { width: 16px; height: 16px; }
+
+/* Needs you: a late payment gets its two ways forward right under it */
+.tc-item.late { background: var(--surface-2); border-radius: 14px; }
+.tc-item.late .tc-row { background: transparent; }
+.tc-acts { display: flex; flex-wrap: wrap; gap: 8px; padding: 0 8px 10px 52px; }
+.chip {
+  display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px; border-radius: 999px;
+  background: var(--surface); border: 1px solid var(--line-2); font-size: 13px; font-weight: 600; color: var(--ink);
+  position: relative; white-space: nowrap;
+}
+.chip::after { content: ""; position: absolute; inset: -6px -1px; } /* 34 + 2 x 5 past the 1px border = 44 */
+.chip svg { width: 14px; height: 14px; }
+.chip.stop { color: var(--red-ink); }
+.btn.ghost.stop { color: var(--red-ink); }
+.cc-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+.cc-foot .cc-chased { margin: 0 2px; }
+
+/* the "didn't pay" sheet */
+.ms-top { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); }
+.ms-top .n { min-width: 0; }
+.ms-top b { display: block; font-weight: 600; }
+.ms-top small { color: var(--muted); font-size: 13px; }
+
+/* client profile: stopped card + why a plan ended */
+.decide.stopped { background: var(--surface-2); }
+.decide.stopped .ico { background: var(--card); color: var(--on-card); }
+.tl-main small.tl-why { color: var(--red-ink); display: flex; align-items: center; gap: 4px; margin-top: 2px; }
+.tl-why svg { width: 12px; height: 12px; flex: 0 0 auto; }
+
+/* Growth: the lost share sits at the top of each month's "due" bar */
+.sw.lost { background: #FF7A6E; }
+.col .b.due { position: relative; overflow: hidden; }
+.col .b.due em.lost { position: absolute; left: 0; right: 0; top: 0; background: #FF7A6E; }
+.readout .lost { color: #FF9187; font-weight: 600; }
+.chased { white-space: nowrap; }
+/* cards under a client's profile (what's next / service stopped) sit 10px apart like the rest */
+.profile ~ .decide { margin: 10px 0 0; }
+.needs-part + .hint { margin: 2px 0 12px; }

@@ -6,7 +6,7 @@ export const KINDS = ["pt", "coaching", "programme", "break"];
 export const BILLINGS = ["monthly", "upfront", "split", "none"];
 export const TENURES = ["new", "newish", "longstanding"];
 export const METHODS = ["manual", "dd"];
-export const WEEKS = [4, 8, 12, 16];
+export const WEEKS = [4, 6, 8, 12, 16];
 
 export const KIND_LABEL = { pt: "Personal training", coaching: "Full coaching", programme: "Programme", break: "Break" };
 export const PKG_LABEL = { pt: "Personal training only", coaching: "Full coaching", programme: "Programme only" };

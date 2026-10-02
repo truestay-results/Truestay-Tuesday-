@@ -34,6 +34,7 @@ Rules that keep it readable:
 - Red as a fill uses `--red`; red as text uses `--red-ink`. They are different colours on purpose.
 - White text on the green "paid" swipe uses `#178048` (4.98:1), not `--green`.
 - Status is never colour alone: overdue, unpaid and paid always come with a word or a tick as well.
+- Didn't pay is settled, not urgent, so it's quiet: grey, the amount crossed out, an x, and always the words "Didn't pay". Only charts and the month's progress bar use a soft red (`#FF7A6E` on the dark cards) for the lost share of what was due.
 
 ## Type
 

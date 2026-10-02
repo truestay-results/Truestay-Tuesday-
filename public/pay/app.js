@@ -11,9 +11,9 @@
   const METH = { manual: "Manual", dd: "Direct debit" };
   const METH_LONG = { manual: "Manual payment", dd: "Direct debit" };
   const CST = { active: "Active", paused: "Paused", finished: "Finished" };
-  const STL = { paid: "Paid", unpaid: "Unpaid", overdue: "Overdue" };
+  const STL = { paid: "Paid", unpaid: "Unpaid", overdue: "Overdue", missed: "Didn't pay" };
   const BILL = { monthly: "Monthly", upfront: "Upfront", split: "Split", none: "As they go" };
-  const WEEKS = [4, 8, 12, 16];
+  const WEEKS = [4, 6, 8, 12, 16];
   const LOCKS = [
     [1, "Every time I open it"],
     [5, "After 5 minutes away"],
@@ -193,7 +193,10 @@
 
   const client = (id) => S.cmap.get(id);
   const cname = (p) => client(p.client_id)?.name || "Deleted client";
-  const stOf = (p) => (p.paid_date ? "paid" : p.due_date < londonToday() ? "overdue" : "unpaid");
+  // "missed" = marked as didn't pay: clients pay up front, so it's lost money, not owed money
+  const stOf = (p) => (p.paid_date ? "paid" : p.missed_on ? "missed" : p.due_date < londonToday() ? "overdue" : "unpaid");
+  const isOpen = (p) => !p.paid_date && !p.missed_on; // still expected: counts as owed, gets chased
+  const isLost = (p) => !p.paid_date && !!p.missed_on;
   const pkgText = (pkg, weeks) => (pkg === "programme" && weeks ? `${weeks}-week programme` : PKG[pkg]);
 
   // ---------- plans ----------
@@ -263,7 +266,7 @@
   }
   function actionCount() {
     const today = londonToday();
-    return S.data.payments.filter((p) => !p.paid_date && p.due_date <= today).length;
+    return S.data.payments.filter((p) => isOpen(p) && p.due_date <= today).length;
   }
   function updateBadge() {
     try {
@@ -676,15 +679,21 @@
   }
 
   // ---------- derived numbers ----------
+  // due = everything that was expected that month (the prediction); it ends up collected, still to come, or lost
   function monthStats(mk) {
     const ps = S.data.payments;
     const due = ps.filter((p) => mKey(p.due_date) === mk);
-    const unpaid = due.filter((p) => !p.paid_date);
+    const unpaid = due.filter(isOpen);
+    const lost = due.filter(isLost);
     const received = ps.filter((p) => p.paid_date && mKey(p.paid_date) === mk);
     const overdue = ps.filter((p) => stOf(p) === "overdue");
     const dueSum = sum(due);
     const unpaidSum = sum(unpaid);
-    return { due, dueSum, unpaid, unpaidSum, received, receivedSum: sum(received), overdue, overdueSum: sum(overdue), collected: dueSum - unpaidSum };
+    const lostSum = sum(lost);
+    return {
+      due, dueSum, unpaid, unpaidSum, lost, lostSum, received, receivedSum: sum(received), overdue, overdueSum: sum(overdue),
+      collected: dueSum - unpaidSum - lostSum,
+    };
   }
   function monthRange() {
     const cur = mKey(londonToday());
@@ -732,10 +741,14 @@
   function pill(p) {
     const st = stOf(p);
     if (st === "paid") return `<span class="pill paid">Paid ${fmtDay(p.paid_date)}</span>`;
+    if (st === "missed") return `<span class="pill missed">Didn't pay</span>`;
     if (st === "overdue") return `<span class="pill overdue">Overdue · ${daysBetween(p.due_date, londonToday())}d</span>`;
     return `<span class="pill unpaid">Unpaid</span>`;
   }
-  const chasedNote = (p) => (p.chase_count && !p.paid_date ? `<span class="chased">${ic("chat")} Chased ${p.chase_count > 1 ? p.chase_count + "× · " : ""}${ago(p.chased_at)}</span>` : "");
+  const chasedNote = (p) => (p.chase_count && isOpen(p) ? `<span class="chased">${ic("chat")} Chased ${p.chase_count > 1 ? p.chase_count + "× · " : ""}${ago(p.chased_at)}</span>` : "");
+  // what happened when it was marked as didn't pay
+  const STOPPED = { pause: ["pause", "Service stopped"], finish: ["flag", "Finished"], skip: ["repeat", "Plan carried on"] };
+  const stopNote = (p) => (isLost(p) && STOPPED[p.stop_mode] ? `<span class="chased">${ic(STOPPED[p.stop_mode][0])} ${STOPPED[p.stop_mode][1]}</span>` : "");
   function prow(p, { showClient = true } = {}) {
     const st = stOf(p);
     const rep = p.auto ? " " + ic("repeat") : "";
@@ -746,7 +759,7 @@
       <div class="main">
         <div class="name">${title}</div>
         <div class="meta">${meta}</div>
-        <div class="pills">${pill(p)}${chasedNote(p)}</div>
+        <div class="pills">${pill(p)}${chasedNote(p)}${stopNote(p)}</div>
       </div>
       <div class="right">
         <div class="amt num">${money(p.amount_pence)}</div>
@@ -755,10 +768,12 @@
       ${
         st === "paid"
           ? `<div class="paydone" aria-label="Paid">${ic("check")}</div>`
+          : st === "missed"
+          ? `<div class="paydone lost" aria-label="Didn't pay">${ic("x")}</div>`
           : `<button class="paybtn" data-pay="${p.id}" aria-label="Mark ${esc(cname(p))} as paid">${ic("check")}</button>`
       }
     </div>`;
-    return st === "paid"
+    return !isOpen(p)
       ? `<div class="swipe" data-pid="${p.id}">${row}</div>`
       : `<div class="swipe" data-pid="${p.id}"><div class="swipe-bg chase">${ic("chat")} Chase</div><div class="swipe-bg paid">${ic("check")} Paid</div>${row}</div>`;
   }
@@ -776,7 +791,7 @@
           <td>${METH_LONG[p.method]}</td>
           <td><span class="pill ${st}">${STL[st]}</span></td>
           <td class="num">${fmtUK(p.paid_date)}</td>
-          <td><div class="acts">${st !== "paid" ? `<button class="mini dark" data-pay="${p.id}">Mark paid</button><button class="mini" data-chase="${p.id}">Chase</button>` : ""}<button class="mini" data-open-pay="${p.id}">Edit</button></div></td>
+          <td><div class="acts">${isOpen(p) ? `<button class="mini dark" data-pay="${p.id}">Mark paid</button><button class="mini" data-chase="${p.id}">Chase</button>` : ""}<button class="mini" data-open-pay="${p.id}">Edit</button></div></td>
         </tr>`;
         })
         .join("")}</tbody></table></div>`;
@@ -812,6 +827,8 @@
     const maxBar = Math.max(1, ...range.map((k) => sum(S.data.payments.filter((p) => mKey(p.due_date) === k))));
     const idx = range.indexOf(mk);
     const pct = st.dueSum ? Math.round((st.collected / st.dueSum) * 100) : 0;
+    const lostPct = st.dueSum ? Math.round((st.lostSum / st.dueSum) * 100) : 0;
+    const lostWho = [...new Set(st.lost.map((p) => firstName(cname(p))))];
     const older = st.overdue.filter((p) => mKey(p.due_date) < mk);
     const noClients = !S.data.clients.length;
     const showFace = S.platformAuth && !S.session.hasPasskey && pref("hideFace", "0") !== "1";
@@ -836,12 +853,16 @@
             const ps = S.data.payments.filter((p) => mKey(p.due_date) === k);
             const due = sum(ps);
             const got = sum(ps.filter((p) => p.paid_date));
+            const lost = sum(ps.filter(isLost));
             const hh = Math.round((due / maxBar) * 40);
             const hg = due ? Math.round((got / due) * hh) : 0;
+            const hl = due && lost ? Math.max(3, Math.round((lost / due) * hh)) : 0;
+            const ho = Math.max(hl ? 0 : 4, hh - hg - hl);
             return `<button class="mpill${k === mk ? " sel" : ""}${k === cur ? " now" : ""}" data-month="${k}" style="--i:${i}" aria-label="${mLabel(k)}">
               <div class="bars">
-                <div class="bar" style="height:${Math.max(4, hh - hg)}px;${hg ? "border-radius:8px 8px 0 0" : ""}"></div>
-                ${hg ? `<div class="bar recv" style="height:${hg}px;border-radius:0 0 4px 4px"></div>` : ""}
+                ${hl ? `<div class="bar lost" style="height:${hl}px"></div>` : ""}
+                ${ho ? `<div class="bar" style="height:${ho}px"></div>` : ""}
+                ${hg ? `<div class="bar recv" style="height:${hg}px"></div>` : ""}
               </div>
               <span class="lbl">${mShort(k)}</span></button>`;
           })
@@ -852,11 +873,12 @@
         ${rings}
         <div class="k">Due in ${mName(mk)}</div>
         <div class="big">${count("due", st.dueSum, "big")}</div>
-        <div class="sub">${plural(st.due.length, "payment")} scheduled · ${money(st.collected)} of it paid</div>
-        <div class="progress" role="img" aria-label="${pct}% of this month's payments collected">
+        <div class="sub">${plural(st.due.length, "payment")} scheduled · ${money(st.collected)} of it paid${st.lostSum ? ` · ${money(st.lostSum)} lost` : ""}</div>
+        <div class="progress" role="img" aria-label="${pct}% of this month's payments collected${st.lostSum ? `, ${lostPct}% lost` : ""}">
+          ${lostPct ? `<div class="lostbar" style="width:${lostPct}%"></div>` : ""}
           <div class="fill" data-pct="${pct}" style="width:${S.counts.pct ?? 0}%"><span class="knob">${count("pct", pct, "pct")}</span></div>
         </div>
-        <div class="progress-legend"><span>Collected ${money(st.collected)}</span><span>Left ${money(st.unpaidSum)}</span></div>
+        <div class="progress-legend"><span>Collected ${money(st.collected)}</span><span>Left ${money(st.unpaidSum)}</span>${st.lostSum ? `<span class="lost">Lost ${money(st.lostSum)}</span>` : ""}</div>
       </section>
 
       <div class="tiles">
@@ -879,6 +901,11 @@
           <div class="s">${st.overdue.length ? '<span class="live"></span>' + plural(st.overdue.length, "payment") + " · tap to chase" : "0 payments, all months"}</div>
         </button>
       </div>
+      ${
+        st.lostSum
+          ? `<button class="lost-line rise" style="--i:6" data-scope="month" data-status="missed"><span class="dot">${ic("x")}</span><span><b>${money(st.lostSum)} lost in ${mName(mk)}</b><br>${esc(lostWho.join(", "))} didn't pay</span><span class="go">${ic("right")}</span></button>`
+          : ""
+      }
       ${mk === mKey(TRACK_START) ? `<p class="note">${ic("info")}<span>Tracking started on 28 September 2026, so September only includes payments from then on.</span></p>` : ""}
       ${mk > cur ? `<p class="note">${ic("info")}<span>Only shows payments already on the books. Monthly plans add theirs about a month ahead.</span></p>` : ""}
       ${
@@ -915,7 +942,7 @@
         </div>
         <div class="filter-row">
           <select class="pick${S.fStatus !== "all" ? " active" : ""}" id="fStatus" aria-label="Status">
-            ${[["all", "Any status"], ["notpaid", "Unpaid + overdue"], ["unpaid", "Unpaid"], ["overdue", "Overdue"], ["paid", "Paid"]]
+            ${[["all", "Any status"], ["notpaid", "Unpaid + overdue"], ["unpaid", "Unpaid"], ["overdue", "Overdue"], ["paid", "Paid"], ["missed", "Didn't pay"]]
               .map(([v, l]) => `<option value="${v}" ${S.fStatus === v ? "selected" : ""}>${l}</option>`)
               .join("")}
           </select>
@@ -931,7 +958,7 @@
 
   function todayCard() {
     const today = londonToday();
-    const unpaid = S.data.payments.filter((p) => !p.paid_date);
+    const unpaid = S.data.payments.filter(isOpen);
     const dueToday = unpaid.filter((p) => p.due_date === today);
     const week = unpaid.filter((p) => p.due_date > today && p.due_date <= addDays(today, 7));
     const overdue = unpaid.filter((p) => p.due_date < today);
@@ -963,7 +990,7 @@
   // ---------- "Needs you": what the notification / app badge is about ----------
   function needsItems() {
     const today = londonToday();
-    const unpaid = S.data.payments.filter((p) => !p.paid_date);
+    const unpaid = S.data.payments.filter(isOpen);
     return {
       dueToday: unpaid.filter((p) => p.due_date === today),
       overdue: unpaid.filter((p) => p.due_date < today).sort((a, b) => (a.due_date < b.due_date ? -1 : 1)),
@@ -979,7 +1006,7 @@
     const { dueToday, overdue, ending } = needsItems();
     if (!dueToday.length && !overdue.length && !ending.length)
       return `<div class="needs-clear">${ic("check")}<b>All clear</b><p>Nothing's waiting on you. If a notification brought you here, whatever it was about has been sorted since.</p></div>`;
-    const row = (p, late) => `<div class="tc-row" data-open-pay="${p.id}" role="button" tabindex="0">
+    const row = (p, late) => `<div class="tc-item${late ? " late" : ""}"><div class="tc-row" data-open-pay="${p.id}" role="button" tabindex="0">
         <span class="av sm">${esc(initials(cname(p)))}</span>
         <span class="n">${esc(cname(p))}<small>${
           late
@@ -988,7 +1015,11 @@
         }</small></span>
         <span class="a num">${money(p.amount_pence)}</span>
         <button class="paybtn sm" data-pay="${p.id}" aria-label="Mark ${esc(cname(p))} as paid">${ic("check")}</button>
-      </div>`;
+      </div>${
+        late
+          ? `<div class="tc-acts"><button class="chip" data-chase="${p.id}">${ic("chat")} Chase</button><button class="chip stop" data-missed="${p.id}">${ic("x")} Didn't pay</button></div>`
+          : ""
+      }</div>`;
     const part = (title, sub, body) => `<section class="needs-part"><h4>${title}<small>${sub}</small></h4><div class="tc-list">${body}</div></section>`;
     return `
       <p class="hint">Tick anything that's come in. It drops off here and off the app badge.</p>
@@ -996,7 +1027,8 @@
       ${
         overdue.length
           ? part("Not marked paid yet", `${plural(overdue.length, "payment")} · ${money(sum(overdue))}`, overdue.map((p) => row(p, true)).join("")) +
-            `<button class="btn ghost" data-action="chase-list">${ic("chat")} Chase ${overdue.length === 1 ? "it" : "them"}</button>`
+            `<p class="hint">Not coming? Tap <b>Didn't pay</b>: their service stops and it counts as money lost, not owed.</p>` +
+            (overdue.length > 1 ? `<button class="btn ghost" data-action="chase-list">${ic("chat")} Chase them all</button>` : "")
           : ""
       }
       ${
@@ -1036,8 +1068,8 @@
     let ps = S.data.payments.slice();
     if (S.scope === "month") ps = ps.filter((p) => mKey(p.due_date) === mk);
     else if (S.scope === "received") ps = ps.filter((p) => p.paid_date && mKey(p.paid_date) === mk);
-    else if (S.scope === "unpaid") ps = ps.filter((p) => !p.paid_date);
-    if (S.fStatus === "notpaid") ps = ps.filter((p) => !p.paid_date);
+    else if (S.scope === "unpaid") ps = ps.filter(isOpen);
+    if (S.fStatus === "notpaid") ps = ps.filter(isOpen);
     else if (S.fStatus !== "all") ps = ps.filter((p) => stOf(p) === S.fStatus);
     if (S.fPkg !== "all") ps = ps.filter((p) => p.package === S.fPkg);
     if (S.q.trim()) {
@@ -1067,7 +1099,7 @@
       el.innerHTML = `<div class="empty"><b>${msg}</b>${S.scope === "month" ? `<button class="btn sm" data-action="add-payment">${ic("plus")} Add payment</button>` : ""}</div>`;
       return;
     }
-    const hasUnpaid = ps.some((p) => !p.paid_date);
+    const hasUnpaid = ps.some(isOpen);
     el.innerHTML =
       (S.listMode === "table" ? ptable(ps) : `<div class="list">${ps.map((p) => prow(p)).join("")}</div>`) +
       `<div class="total-line"><span>${plural(ps.length, "payment")}</span><span>Total <b class="num">${money(sum(ps))}</b></span></div>` +
@@ -1088,7 +1120,7 @@
       if (!byDay.has(d)) byDay.set(d, []);
       byDay.get(d).push(p);
     }
-    const order = { overdue: 0, unpaid: 1, paid: 2 };
+    const order = { overdue: 0, unpaid: 1, missed: 2, paid: 3 };
     let cells = "";
     for (let i = 0; i < lead; i++) cells += `<div class="day out"></div>`;
     for (let d = 1; d <= n; d++) {
@@ -1117,10 +1149,12 @@
         </div>
         <div class="wk"><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span></div>
         <div class="grid ${S.calAnim}" id="calGrid">${cells}</div>
-        <div class="cal-legend"><span><i style="background:var(--red)"></i>Overdue</span><span><i style="background:var(--amber)"></i>Unpaid</span><span><i style="background:var(--green)"></i>Paid</span></div>
+        <div class="cal-legend"><span><i style="background:var(--red)"></i>Overdue</span><span><i style="background:var(--amber)"></i>Unpaid</span><span><i style="background:var(--green)"></i>Paid</span>${
+          S.data.payments.some(isLost) ? `<span><i class="lost"></i>Didn't pay</span>` : ""
+        }</div>
       </div>
       <div class="cal-totals">
-        <div class="tile rise" style="--i:1"><div class="k">Due in ${mShort(mk)}</div><div class="v">${count("cdue", st.dueSum)}</div><div class="s">${money(st.unpaidSum)} still unpaid</div></div>
+        <div class="tile rise" style="--i:1"><div class="k">Due in ${mShort(mk)}</div><div class="v">${count("cdue", st.dueSum)}</div><div class="s">${money(st.unpaidSum)} still unpaid${st.lostSum ? ` · ${money(st.lostSum)} lost` : ""}</div></div>
         <div class="tile lime rise" style="--i:2"><div class="k">Received in ${mShort(mk)}</div><div class="v" style="font-size:27px">${count("crecv", st.receivedSum)}</div><div class="s">by paid date</div></div>
       </div>
       <div class="day-head"><h3>${fmtLong(S.calDay)}</h3><span class="num">${dayItems.length ? money(sum(dayItems)) : ""}</span></div>
@@ -1135,9 +1169,19 @@
 
   const clientPayments = (id) => S.data.payments.filter((p) => p.client_id === id);
   const clientOwes = (id) => clientPayments(id).filter((p) => stOf(p) === "overdue");
+  // the didn't-pay payment behind a client's current stop (only while their plans still look the way the stop left them)
+  const stopBy = (id) =>
+    clientPayments(id)
+      .filter((p) => isLost(p) && p.can_restart)
+      .sort((a, b) => (a.due_date < b.due_date ? 1 : -1))[0] || null;
+  // plans ended by a didn't-pay, and breaks it started: why they ended, for the timeline
+  const stoppedBy = (planId) => {
+    const cid = planOf(planId)?.client_id;
+    return S.data.payments.find((p) => p.client_id === cid && isLost(p) && ((p.stop_plans || []).includes(planId) || p.stop_break === planId)) || null;
+  };
   const clientNext = (id) =>
     clientPayments(id)
-      .filter((p) => !p.paid_date && p.due_date >= londonToday())
+      .filter((p) => isOpen(p) && p.due_date >= londonToday())
       .sort((a, b) => (a.due_date < b.due_date ? -1 : 1))[0];
 
   function viewClients() {
@@ -1177,7 +1221,19 @@
         const next = clientNext(c.id);
         const status = statusOf(c);
         const cp = curPlan(c.id);
-        const plan = cp ? (cp.kind === "break" ? `On a break${cp.end_date ? ` until ${fmtDay(cp.end_date)}` : ""}` : `${planName(cp)} · ${planPrice(cp)}`) : upcomingPlan(c.id) ? `Starts ${fmtDay(upcomingPlan(c.id).start_date)}` : status === "finished" ? `Finished ${fmtDay(c.finished_on)}` : "No plan yet";
+        const stop = stopBy(c.id);
+        const plan =
+          stop && ((cp && cp.id === stop.stop_break) || (status === "finished" && stop.stop_mode === "finish"))
+            ? `${stop.stop_mode === "finish" ? "Finished" : "Service stopped"}: didn't pay ${fmtDay(stop.due_date)}`
+            : cp
+            ? cp.kind === "break"
+              ? `On a break${cp.end_date ? ` until ${fmtDay(cp.end_date)}` : ""}`
+              : `${planName(cp)} · ${planPrice(cp)}`
+            : upcomingPlan(c.id)
+            ? `Starts ${fmtDay(upcomingPlan(c.id).start_date)}`
+            : status === "finished"
+            ? `Finished ${fmtDay(c.finished_on)}`
+            : "No plan yet";
         const right = owes.length
           ? `<b class="owe num">${money(sum(owes))}</b>overdue`
           : next
@@ -1212,7 +1268,11 @@
     const avg = Math.round(sum(received) / months);
     const hours = cp && cp.hours_per_month ? cp.hours_per_month : null;
     const rate = hours ? Math.round(monthlyValue(cp) / hours) : null;
-    const planLine = cp ? (cp.kind === "break" ? `On a break${cp.end_date ? ` until ${fmtDay(cp.end_date)}` : ""}` : planName(cp)) : status === "finished" ? "Finished" : "No current plan";
+    const stop = stopBy(c.id);
+    const stopped = stop && ((cp && cp.id === stop.stop_break) || (status === "finished" && stop.stop_mode === "finish"));
+    const planLine = stopped
+      ? stop.stop_mode === "finish" ? "Finished: didn't pay" : "Service stopped"
+      : cp ? (cp.kind === "break" ? `On a break${cp.end_date ? ` until ${fmtDay(cp.end_date)}` : ""}` : planName(cp)) : status === "finished" ? "Finished" : "No current plan";
     const phone = (c.phone || "").trim();
     return `
       <div class="topbar">
@@ -1239,6 +1299,16 @@
         </div>
       </section>
       ${dec ? decisionCard(dec, 1) : ""}
+      ${
+        stopped
+          ? `<section class="decide stopped rise" style="--i:1">
+              <div class="dh"><span class="ico">${ic(stop.stop_mode === "finish" ? "flag" : "pause")}</span><div><b>${stop.stop_mode === "finish" ? "Finished" : "Service stopped"} from ${fmtShort(stop.stop_from)}</b><small>They didn't pay the ${money(stop.amount_pence)} due ${fmtShort(stop.due_date)}, so it's down as lost. ${
+                stop.stop_mode === "finish" ? "" : "Change plan when they're back."
+              }</small></div></div>
+              <div class="da"><button class="btn sm lime" data-paid-after="${stop.id}">${ic("check")} They've paid after all</button></div>
+            </section>`
+          : ""
+      }
       <div class="quick rise" style="--i:2">
         <button class="btn lime" data-change-plan="${c.id}">${ic("swap")} Change plan</button>
         <button class="btn ghost" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add payment</button>
@@ -1267,9 +1337,13 @@
                 const future = p.start_date > today;
                 const firstFuture = plans.find((x) => x.start_date > today);
                 const tag = isNow ? "Now" : future ? (firstFuture && p.id === firstFuture.id ? "Next" : "Later") : "Ended";
+                const why = stoppedBy(p.id);
+                const whyLine = why
+                  ? `<small class="tl-why">${ic("x")} ${why.stop_break === p.id ? `After they didn't pay on ${fmtDay(why.due_date)}` : `Stopped: didn't pay ${money(why.amount_pence)} due ${fmtDay(why.due_date)}`}</small>`
+                  : "";
                 return `<button class="tl-row${isNow ? " now" : ""}${future ? " next" : ""}${p.kind === "break" ? " brk" : ""}" data-edit-plan="${p.id}">
                   <span class="tl-dot"></span>
-                  <span class="tl-main"><b>${esc(planName(p))}</b><small>${esc(p.kind === "break" ? "No payments" : planPrice(p))}${p.billing === "monthly" && p.day_of_month ? ` · on the ${ordinal(p.day_of_month)}` : ""}</small><small>${planDates(p)}${p.then_action === "decide" && p.end_date ? " · ask me when it ends" : ""}</small></span>
+                  <span class="tl-main"><b>${esc(planName(p))}</b><small>${esc(p.kind === "break" ? "No payments" : planPrice(p))}${p.billing === "monthly" && p.day_of_month ? ` · on the ${ordinal(p.day_of_month)}` : ""}</small><small>${planDates(p)}${p.then_action === "decide" && p.end_date ? " · ask me when it ends" : ""}</small>${whyLine}</span>
                   <span class="tl-tag">${tag}</span>
                 </button>`;
               })
@@ -1287,23 +1361,30 @@
 
   // ---------- Growth ----------
   // ---------- pay habits: builds up as payments come in ----------
-  // A payment counts once it's paid, or once it's more than a day past due and still not in. Paid up to a day after the due date is on time.
+  // A payment counts once it's paid, marked as didn't pay, or more than a day past due and still not in. Paid up to a day after the due date is on time.
   const GRACE_DAYS = 1;
   function payHabit(cid) {
     const today = londonToday();
-    const ps = S.data.payments.filter(
-      (p) =>
-        (cid == null || p.client_id === cid) &&
-        p.due_date >= TRACK_START &&
-        (p.paid_date ? p.due_date <= today : daysBetween(p.due_date, today) > GRACE_DAYS)
-    );
+    const ps = S.data.payments
+      .filter(
+        (p) =>
+          (cid == null || p.client_id === cid) &&
+          p.due_date >= TRACK_START &&
+          (p.paid_date ? p.due_date <= today : p.missed_on || daysBetween(p.due_date, today) > GRACE_DAYS)
+      )
+      .sort((a, b) => (a.due_date < b.due_date ? -1 : a.due_date > b.due_date ? 1 : a.id - b.id));
     let onTime = 0;
     let lateDays = 0;
     let lateN = 0;
     let lateNow = 0;
+    let missed = 0;
     let chases = 0;
     for (const p of ps) {
       chases += p.chase_count || 0;
+      if (isLost(p)) {
+        missed++;
+        continue;
+      }
       if (!p.paid_date) {
         lateNow++;
         continue;
@@ -1318,8 +1399,10 @@
     const n = ps.length;
     const rate = n ? onTime / n : 0;
     const avgLate = lateN ? Math.round(lateDays / lateN) : 0;
+    const lastMissed = n > 0 && isLost(ps[n - 1]);
     let label, tone;
     if (lateNow) (label = "Late now"), (tone = "bad");
+    else if (lastMissed) (label = "Didn't pay"), (tone = "bad");
     else if (n < 2) (label = "Not enough yet"), (tone = "new");
     else if (rate >= 0.9) (label = n >= 3 ? "Always on time" : "On time so far"), (tone = "good");
     else if (chases / n >= 0.5) (label = "Needs chasing"), (tone = "bad");
@@ -1328,8 +1411,9 @@
     const bits = [`${onTime} of ${plural(n, "payment")} on time`];
     if (avgLate) bits.push(`${plural(avgLate, "day")} late on average when late`);
     if (lateNow) bits.push(`${lateNow} not in yet`);
+    if (missed) bits.push(`didn't pay ${missed === 1 ? "once" : missed + "×"}`);
     bits.push(chases ? `chased ${chases}×` : "never chased");
-    return { n, onTime, rate, avgLate, lateN, lateNow, chases, label, tone, line: bits.join(" · ") };
+    return { n, onTime, rate, avgLate, lateN, lateNow, missed, chases, label, tone, line: bits.join(" · ") };
   }
   const habitTag = (h) => `<span class="habit ${h.tone}">${h.label}</span>`;
 
@@ -1378,8 +1462,10 @@
       k,
       due: sum(S.data.payments.filter((p) => mKey(p.due_date) === k)),
       got: sum(S.data.payments.filter((p) => p.paid_date && mKey(p.paid_date) === k)),
+      lost: sum(S.data.payments.filter((p) => isLost(p) && mKey(p.due_date) === k)),
       future: k > cur,
     }));
+    const anyLost = trend.some((t) => t.lost);
     const tMax = Math.max(10000, ...trend.map((t) => Math.max(t.due, t.got))); // floor of £100 so an empty chart reads £100 / £50 / £0, not £0.0.5
     const niceMax = niceCeil(tMax);
     const sel = trend.find((t) => t.k === (S.trendSel || cur)) || trend[0];
@@ -1461,14 +1547,16 @@
 
       <section class="chart-card dark rise" style="--i:1">
         <div class="cc-head"><h3>Money in by month</h3>
-          <div class="legend"><span><i class="sw got"></i>Received</span><span><i class="sw due"></i>Due</span></div></div>
-        <p class="readout" aria-live="polite"><b>${mName(sel.k)}</b> · <b class="num">${money(sel.got)}</b> received · <span class="num">${money(sel.due)}</span> ${sel.future ? "scheduled" : "due"}</p>
+          <div class="legend"><span><i class="sw got"></i>Received</span><span><i class="sw due"></i>Due</span>${anyLost ? `<span><i class="sw lost"></i>Lost</span>` : ""}</div></div>
+        <p class="readout" aria-live="polite"><b>${mName(sel.k)}</b> · <b class="num">${money(sel.got)}</b> received · <span class="num">${money(sel.due)}</span> ${sel.future ? "scheduled" : "due"}${
+          sel.lost ? ` · <span class="num lost">${money(sel.lost)}</span> lost` : ""
+        }</p>
         <div class="trend">
           <div class="grid-lines"><i style="bottom:100%"><span>${moneyCompact(niceMax)}</span></i><i style="bottom:50%"><span>${moneyCompact(niceMax / 2)}</span></i><i style="bottom:0"><span>£0</span></i></div>
           <div class="cols">${trend
             .map(
-              (t, i) => `<button class="col${t.k === sel.k ? " sel" : ""}${t.future ? " future" : ""}" data-trend="${t.k}" style="--i:${i}" aria-label="${mLabel(t.k)}: ${money(t.got)} received, ${money(t.due)} due">
-                <span class="pair"><i class="b due" style="height:${(t.due / niceMax) * 100}%"></i><i class="b got" style="height:${(t.got / niceMax) * 100}%"></i></span>
+              (t, i) => `<button class="col${t.k === sel.k ? " sel" : ""}${t.future ? " future" : ""}" data-trend="${t.k}" style="--i:${i}" aria-label="${mLabel(t.k)}: ${money(t.got)} received, ${money(t.due)} due${t.lost ? `, ${money(t.lost)} lost` : ""}">
+                <span class="pair"><i class="b due" style="height:${(t.due / niceMax) * 100}%">${t.lost ? `<em class="lost" style="height:${(t.lost / t.due) * 100}%"></em>` : ""}</i><i class="b got" style="height:${(t.got / niceMax) * 100}%"></i></span>
                 <span class="lbl">${mShort(t.k)}</span></button>`
             )
             .join("")}</div>
@@ -1476,11 +1564,12 @@
         <button class="linkish" data-action="trend-table">${S.trendTable ? "Hide table" : "Show as a table"}</button>
         ${
           S.trendTable
-            ? `<table class="mini-table"><thead><tr><th>Month</th><th class="n">Due</th><th class="n">Received</th></tr></thead><tbody>${trend
-                .map((t) => `<tr><td>${mLabel(t.k)}</td><td class="n num">${money(t.due)}</td><td class="n num">${money(t.got)}</td></tr>`)
+            ? `<table class="mini-table"><thead><tr><th>Month</th><th class="n">Due</th><th class="n">Received</th>${anyLost ? `<th class="n">Lost</th>` : ""}</tr></thead><tbody>${trend
+                .map((t) => `<tr><td>${mLabel(t.k)}</td><td class="n num">${money(t.due)}</td><td class="n num">${money(t.got)}</td>${anyLost ? `<td class="n num">${t.lost ? money(t.lost) : "—"}</td>` : ""}</tr>`)
                 .join("")}</tbody></table>`
             : ""
         }
+        ${anyLost ? `<p class="cc-note">Lost is what was due but never came because they didn't pay. It stays in Due so you can see what you expected.</p>` : ""}
         ${trend.filter((t) => !t.future).length < 3 ? `<p class="cc-note">Builds up month by month from September 2026.</p>` : ""}
       </section>
 
@@ -1551,6 +1640,7 @@
                <div class="kpi-lines">
                  <p><span>Late on average, when late</span><b class="num">${allHabit.lateN ? plural(allHabit.avgLate, "day") : "—"}</b></p>
                  <p><span>Not in yet</span><b class="num">${allHabit.lateNow}</b></p>
+                 <p><span>Didn't pay</span><b class="num">${allHabit.missed}</b></p>
                  <p><span>Times you've had to chase</span><b class="num">${allHabit.chases}</b></p>
                </div>
                <div class="habits">${habits
@@ -1838,12 +1928,22 @@
         </div>
         <div class="field"><span class="lab">Payment method</span>${opts("method", METH, f.method)}</div>
         ${
-          isEdit
+          isEdit && st === "missed"
+            ? `<div class="status-card missed"><div class="l"><b>Didn't pay</b><small>${esc(missedLine(p))}</small></div><span class="paydone lost" aria-hidden="true">${ic("x")}</span></div>
+               <button type="button" class="btn lime" data-paid-after="${p.id}">${ic("check")} They've paid after all</button>
+               <button type="button" class="linkish center" data-unmiss="${p.id}">Undo: they didn't miss it</button>`
+            : isEdit
             ? `<div class="status-card ${st}"><div class="l"><b>${STL[st]}</b><small>${
                 st === "paid" ? `Received ${fmtLong(p.paid_date)}` : st === "overdue" ? `${plural(daysBetween(p.due_date, today), "day")} past due` : `Due ${fmtLong(p.due_date)}`
-              }${p.chase_count && !p.paid_date ? ` · chased ${p.chase_count}× (last ${ago(p.chased_at)})` : ""}</small></div><span class="switch"><input type="checkbox" id="p-paid" ${p.paid_date ? "checked" : ""} aria-label="Paid"><i></i></span></div>
+              }${p.chase_count && !p.paid_date ? ` · chased ${p.chase_count}× (last ${ago(p.chased_at)})` : ""}</small></div><label class="switch"><input type="checkbox" id="p-paid" ${p.paid_date ? "checked" : ""} aria-label="Paid"><i></i></label></div>
                <div class="field" id="p-paid-f" ${p.paid_date ? "" : "hidden"}><label for="p-paiddate">Date received</label><input id="p-paiddate" type="date" value="${p.paid_date || today}"></div>
-               ${!p.paid_date ? `<button type="button" class="btn ghost" data-chase="${p.id}">${ic("chat")} Chase this payment</button>` : ""}`
+               ${
+                 !p.paid_date
+                   ? p.due_date <= today
+                     ? `<div class="btn-row"><button type="button" class="btn ghost" data-chase="${p.id}">${ic("chat")} Chase</button><button type="button" class="btn ghost stop" data-missed="${p.id}">${ic("x")} Didn't pay</button></div>`
+                     : `<button type="button" class="btn ghost" data-chase="${p.id}">${ic("chat")} Chase this payment</button>`
+                   : ""
+               }`
             : ""
         }
         <div class="field"><label for="p-notes">Notes <span>optional</span></label><textarea id="p-notes" rows="2">${esc(f.notes)}</textarea></div>
@@ -1873,9 +1973,12 @@
         });
       } else {
         const paid = $("#p-paid", sh);
-        paid.addEventListener("change", () => ($("#p-paid-f", sh).hidden = !paid.checked));
+        if (paid) paid.addEventListener("change", () => ($("#p-paid-f", sh).hidden = !paid.checked));
         $("#p-del", sh).onclick = async () => {
-          if (!confirm(`Delete this ${money(p.amount_pence)} payment from ${cname(p)}? This can't be undone.`)) return;
+          const msg = isLost(p)
+            ? `Delete the record of the ${money(p.amount_pence)} ${cname(p)} didn't pay? It stops counting as lost; their plan stays as it is. This can't be undone.`
+            : `Delete this ${money(p.amount_pence)} payment from ${cname(p)}? This can't be undone.`;
+          if (!confirm(msg)) return;
           try {
             const r = await api(`/payments/${p.id}`, { method: "DELETE" });
             setData(r.data);
@@ -1903,7 +2006,8 @@
         if (!body.client_id) return (err.textContent = "Choose a client.");
         if (body.amount_pence == null) return (err.textContent = "Enter the amount in pounds, e.g. 160 or 42.50.");
         if (!body.due_date) return (err.textContent = "Pick a due date.");
-        if (isEdit) body.paid_date = $("#p-paid", sh).checked ? $("#p-paiddate", sh).value || today : null;
+        const paidSw = $("#p-paid", sh);
+        if (isEdit) body.paid_date = paidSw && paidSw.checked ? $("#p-paiddate", sh).value || today : null;
         const btn = $("button[type=submit]", sh);
         btn.disabled = true;
         try {
@@ -1923,7 +2027,7 @@
 
   async function quickPay(id) {
     const p = S.data.payments.find((x) => x.id === id);
-    if (!p || p.paid_date) return;
+    if (!p || !isOpen(p)) return;
     try {
       const r = await api(`/payments/${id}/paid`, { method: "POST", body: { paid_date: londonToday() } });
       setData(r.data);
@@ -1977,6 +2081,160 @@
     );
   }
 
+  // ---------- didn't pay ----------
+  // Clients pay up front, so a payment that doesn't come means their service stops and that money is lost,
+  // not owed. The server does the stop; this works out the same thing first, so the sheet can say what happens.
+  function missedPreview(p) {
+    const plans = plansOf(p.client_id);
+    const own = p.plan_id ? planOf(p.plan_id) : null;
+    const cover = own || planOn(p.client_id, p.due_date);
+    const before = addDays(p.due_date, -1);
+    const end = cover && cover.kind !== "break" && cover.start_date > before ? cover.start_date : before;
+    const reach = plans.filter((x) => !x.end_date || x.end_date > end);
+    const ending = reach.filter((x) => x.start_date <= end);
+    const later = reach.filter((x) => x.start_date > end);
+    const off = S.data.payments
+      .filter((x) => x.id !== p.id && x.auto && isOpen(x) && ((ending.some((e) => e.id === x.plan_id) && x.due_date > end) || later.some((g) => g.id === x.plan_id)))
+      .sort((a, b) => (a.due_date < b.due_date ? -1 : 1));
+    return { end, from: addDays(end, 1), running: reach.some((x) => x.kind !== "break"), laterPlans: later.filter((x) => x.kind !== "break"), off };
+  }
+  function missedLine(p) {
+    const what =
+      p.stop_mode === "pause" ? `service stopped from ${fmtShort(p.stop_from)}` : p.stop_mode === "finish" ? `finished, service stopped from ${fmtShort(p.stop_from)}` : p.stop_mode === "skip" ? "their plan carried on" : "";
+    return `Due ${fmtShort(p.due_date)} · lost, not owed${what ? " · " + what : ""}`;
+  }
+  function missedSheet(p, back) {
+    if (!p || !isOpen(p)) return;
+    const c = client(p.client_id);
+    const first = firstName(c?.name) || "them";
+    const today = londonToday();
+    const pv = missedPreview(p);
+    const late = daysBetween(p.due_date, today);
+    let next = "pause";
+    const html = `
+      <form class="form" id="msForm" novalidate>
+        <div class="ms-top"><span class="av">${esc(initials(c?.name))}</span><span class="n"><b>${esc(c?.name || "")}</b><small>${money(p.amount_pence)} · due ${fmtShort(p.due_date)}${late > 0 ? ` · ${plural(late, "day")} late` : " · today"}</small></span></div>
+        <p class="hint">It goes down as money lost, not owed: off the overdue list, never chased, and shown against what you expected for ${mName(mKey(p.due_date))}.</p>
+        <div class="field"><span class="lab">What happens to ${esc(first)} now?</span>${opts("next", { pause: "Stop service", skip: "Skip this one", finish: "Finished" }, next)}</div>
+        <div class="summary" id="msSum"></div>
+        <div class="form-err" id="ms-err"></div>
+        <button class="btn lime" type="submit">Mark as didn't pay</button>
+      </form>`;
+    const offLine = (ps) =>
+      ps.length ? `<li class="minus">Comes off what's expected: ${ps.slice(0, 3).map((x) => `${fmtDay(x.due_date)} ${money(x.amount_pence)}`).join(", ")}${ps.length > 3 ? "…" : ""}.</li>` : "";
+    const laterLine = pv.laterPlans.length ? `<li class="minus">Their ${esc(pv.laterPlans.map((x) => planName(x).toLowerCase()).join(" and "))} from ${fmtShort(pv.laterPlans[0].start_date)} is taken off too.</li>` : "";
+    const summary = (sh) => {
+      const lines = [];
+      if (next === "pause") {
+        if (pv.running) {
+          lines.push(`<li>Service stops from ${fmtShort(pv.from)}. They go on a break until you start them again.</li>`);
+          lines.push(offLine(pv.off), laterLine);
+        } else lines.push(`<li>They're already on a break, so nothing else changes.</li>`);
+      } else if (next === "finish") {
+        lines.push(`<li>Marked as finished. Last day ${fmtShort(pv.end)}.</li>`, offLine(pv.off), laterLine);
+      } else {
+        const nx = clientPayments(p.client_id).filter((x) => x.id !== p.id && isOpen(x) && x.due_date > p.due_date).sort((a, b) => (a.due_date < b.due_date ? -1 : 1))[0];
+        lines.push(`<li>Their plan carries on as normal.${nx ? ` Next payment ${fmtShort(nx.due_date)} · ${money(nx.amount_pence)} stays on the books.` : ""}</li>`);
+      }
+      lines.push(`<li class="keep">If they pay after all, one tap puts it all back.</li>`);
+      $("#msSum", sh).innerHTML = `<h4>What happens</h4><ul>${lines.join("")}</ul>`;
+    };
+    openSheet("Didn't pay", html, (sh) => {
+      summary(sh);
+      $('[data-name="next"]', sh).addEventListener("change", (e) => {
+        next = e.currentTarget.dataset.value;
+        summary(sh);
+      });
+      $("#msForm", sh).onsubmit = async (e) => {
+        e.preventDefault();
+        const btn = $("button[type=submit]", sh);
+        btn.disabled = true;
+        try {
+          const r = await api(`/payments/${p.id}/missed`, { method: "POST", body: { next } });
+          setData(r.data);
+          closeSheet();
+          haptic();
+          rerender();
+          const tail = next === "pause" && pv.running ? ", service stopped" : next === "finish" ? ", marked as finished" : "";
+          toast(`${first} · ${money(p.amount_pence)} down as lost${tail}`, [{ label: "Undo", fn: () => unmissPayment(p.id, false) }]);
+          if (back) setTimeout(back, 420);
+        } catch (e2) {
+          btn.disabled = false;
+          if (!e2.silent) $("#ms-err", sh).textContent = e2.message;
+        }
+      };
+    });
+  }
+  async function unmissPayment(id, ask = true) {
+    const p = S.data.payments.find((x) => x.id === id);
+    if (!p || !isLost(p)) return;
+    const who = firstName(cname(p));
+    const stopped = p.stop_mode === "pause" || p.stop_mode === "finish";
+    if (ask) {
+      const msg = !stopped
+        ? `Put ${who}'s ${money(p.amount_pence)} back as not paid?`
+        : p.can_restart
+        ? `Put ${who}'s ${money(p.amount_pence)} back as not paid, and their plan back as it was?`
+        : `Put ${who}'s ${money(p.amount_pence)} back as not paid? Their plans have changed since, so they stay as they are.`;
+      if (!confirm(msg)) return;
+    }
+    try {
+      const r = await api(`/payments/${id}/missed`, { method: "POST", body: { undo: true } });
+      setData(r.data);
+      if (ask && sheet) closeSheet(); // from the payment's own sheet; from the toast, whatever's open just refreshes
+      rerender();
+      toast(r.restored ? `Undone. ${who}'s plan is back as it was` : "Undone. It's back to not paid");
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function paidAfterSheet(id) {
+    const p = S.data.payments.find((x) => x.id === id);
+    if (!p || !isLost(p)) return;
+    const who = firstName(cname(p));
+    const sp = planOf((p.stop_plans || [])[0]);
+    const stopped = p.stop_mode === "pause" || p.stop_mode === "finish";
+    openSheet(
+      "They've paid",
+      `<form class="form" id="paForm" novalidate>
+        <p class="hint">${esc(cname(p))} · ${money(p.amount_pence)} · due ${fmtShort(p.due_date)}</p>
+        <div class="field"><label for="pa-date">Date received</label><input id="pa-date" type="date" value="${londonToday()}"></div>
+        ${
+          stopped && p.can_restart
+            ? `<label class="switch-row"><span class="l">Restart ${esc(who)}'s plan<small>${
+                sp ? `Back on ${esc(planName(sp).toLowerCase())} · ${esc(planPrice(sp))}` : "Back as it was"
+              }, with the payments that came off put back</small></span><span class="switch"><input type="checkbox" id="pa-restart" checked><i></i></span></label>`
+            : stopped
+            ? `<p class="hint">Their plans have changed since, so they stay as they are. Use Change plan if they need restarting.</p>`
+            : ""
+        }
+        <div class="form-err" id="pa-err"></div>
+        <button class="btn lime" type="submit">${ic("check")} Mark as paid</button>
+      </form>`,
+      (sh) => {
+        $("#paForm", sh).onsubmit = async (e) => {
+          e.preventDefault();
+          const btn = $("button[type=submit]", sh);
+          btn.disabled = true;
+          const restart = !!$("#pa-restart", sh)?.checked;
+          try {
+            const r = await api(`/payments/${p.id}/paid`, { method: "POST", body: { paid_date: $("#pa-date", sh).value || londonToday(), restart } });
+            const rect = btn.getBoundingClientRect();
+            burst(rect.left + rect.width / 2, rect.top + rect.height / 2);
+            setData(r.data);
+            closeSheet();
+            haptic();
+            rerender();
+            toast(`${who} · ${money(p.amount_pence)} paid${r.restored ? ". Plan's back on" : ""}`);
+          } catch (e2) {
+            btn.disabled = false;
+            if (!e2.silent) $("#pa-err", sh).textContent = e2.message;
+          }
+        };
+      }
+    );
+  }
+
   // ---------- chasing ----------
   function waNumber(phone) {
     let d = String(phone).replace(/[^\d+]/g, "");
@@ -2017,7 +2275,7 @@
   }
   function chaseSheet(list) {
     const today = londonToday();
-    const ps = (list || S.data.payments.filter((p) => !p.paid_date && p.due_date < today)).slice().sort((a, b) => (a.due_date < b.due_date ? -1 : 1));
+    const ps = (list || S.data.payments.filter((p) => isOpen(p) && p.due_date < today)).filter(isOpen).sort((a, b) => (a.due_date < b.due_date ? -1 : 1));
     if (!ps.length) return toast("Nothing overdue to chase.");
     const canShare = !!navigator.share;
     const html = `
@@ -2033,7 +2291,9 @@
               <span class="cc-n"><b>${esc(c?.name || "")}</b><small>${money(p.amount_pence)} · due ${fmtShort(p.due_date)}${late > 0 ? ` · ${late}d late` : ""}</small></span>
               <button class="paybtn sm" data-pay="${p.id}" aria-label="Mark paid">${ic("check")}</button></div>
             <p class="cc-msg">${esc(msg)}</p>
-            <p class="cc-chased">${p.chase_count ? `Chased ${p.chase_count > 1 ? p.chase_count + "× · " : ""}${ago(p.chased_at)}` : "Not chased yet"}</p>
+            <div class="cc-foot"><p class="cc-chased">${p.chase_count ? `Chased ${p.chase_count > 1 ? p.chase_count + "× · " : ""}${ago(p.chased_at)}` : "Not chased yet"}</p>${
+              p.due_date <= today ? `<button class="chip stop" data-missed="${p.id}">${ic("x")} Didn't pay</button>` : ""
+            }</div>
             <div class="cc-acts">
               ${
                 phone
@@ -2048,6 +2308,7 @@
         .join("")}</div>
       <button class="linkish center" data-action="template">Edit the message</button>`;
     openSheet(list && list.length === 1 ? "Chase payment" : "Chase list", html, (sh) => {
+      sh.dataset.kind = list ? "chase-some" : "chase";
       sh.addEventListener("click", async (e) => {
         const a = e.target.closest("[data-log-chase]");
         if (a) {
@@ -2081,7 +2342,7 @@
 
   function templateSheet() {
     const set = S.data.settings || {};
-    const sample = S.data.payments.find((p) => !p.paid_date) || { client_id: S.data.clients[0]?.id, amount_pence: 16000, due_date: londonToday(), package: "coaching" };
+    const sample = S.data.payments.find(isOpen) || { client_id: S.data.clients[0]?.id, amount_pence: 16000, due_date: londonToday(), package: "coaching" };
     openSheet(
       "Chase message",
       `<form class="form" id="tplForm">
@@ -2382,7 +2643,7 @@
         const plans = plansOf(c.id);
         for (const p of plans.filter((x) => x.start_date < S0 && (!x.end_date || x.end_date >= S0))) {
           lines.push(`<li>${esc(planName(p))} ends ${fmtShort(E)}.</li>`);
-          const gone = S.data.payments.filter((x) => x.plan_id === p.id && x.auto && !x.paid_date && x.due_date > E);
+          const gone = S.data.payments.filter((x) => x.plan_id === p.id && x.auto && isOpen(x) && x.due_date > E);
           if (gone.length) lines.push(`<li class="minus">Removes ${plural(gone.length, "upcoming payment")}: ${gone.slice(0, 3).map((g) => `${fmtDay(g.due_date)} ${money(g.amount_pence)}`).join(", ")}${gone.length > 3 ? "…" : ""}</li>`);
         }
         for (const p of plans.filter((x) => x.start_date >= S0)) lines.push(`<li class="minus">Replaces the ${esc(planName(p).toLowerCase())} planned from ${fmtShort(p.start_date)}.</li>`);
@@ -2408,7 +2669,7 @@
           if (thenMode === "resume" && prev) lines.push(`<li class="plus">Then back to ${esc(planName(prev))} · ${esc(planPrice(prev))} from ${fmtShort(addDays(end, 1))}.</li>`);
           else lines.push(`<li>On ${fmtShort(end)} you'll be asked what's next.</li>`);
         }
-        lines.push(`<li class="keep">Anything already paid, or due before ${fmtShort(S0)}, stays as it is.</li>`);
+        lines.push(`<li class="keep">Anything already paid or down as didn't pay, or due before ${fmtShort(S0)}, stays as it is.</li>`);
         sumBox.hidden = false;
         sumBox.innerHTML = `<h4>What happens</h4><ul>${lines.join("")}</ul>`;
         go.disabled = false;
@@ -2505,7 +2766,7 @@
       hours: p.sessions_per_week ? "" : p.hours_per_month || "",
       notes: p.notes || "",
     };
-    const paid = S.data.payments.filter((x) => x.plan_id === p.id && x.paid_date).length;
+    const paid = S.data.payments.filter((x) => x.plan_id === p.id && !isOpen(x)).length; // paid or didn't pay: kept, so no delete
     const html = `
       <form class="form" id="epForm" novalidate>
         <p class="hint">Fixes this plan in place. Its unpaid payments update to match; paid ones never change. For a change from a date onwards (new price, new package), use <b>Change plan</b> instead.</p>
@@ -2909,10 +3170,24 @@
         return;
       }
       const t = e.target.closest(
-        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix]"
+        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix],[data-missed],[data-unmiss],[data-paid-after]"
       );
       if (!t || t.disabled) return;
       const d = t.dataset;
+      if (d.missed) {
+        const p = S.data.payments.find((x) => x.id === Number(d.missed));
+        // opened from Needs you or the chase list: go back to it afterwards if anything's left there
+        const from = sheet ? sheet.sh.dataset.kind : null;
+        const back =
+          from === "needs"
+            ? () => needCount() && needsSheet()
+            : from === "chase"
+            ? () => S.data.payments.some((x) => isOpen(x) && x.due_date < londonToday()) && chaseSheet()
+            : null;
+        return missedSheet(p, back);
+      }
+      if (d.unmiss) return unmissPayment(Number(d.unmiss));
+      if (d.paidAfter) return paidAfterSheet(Number(d.paidAfter));
       if (d.pay) {
         e.stopPropagation();
         haptic();
@@ -3022,7 +3297,7 @@
         S.scope = d.scope;
         if (d.status) S.fStatus = d.status;
         rerender();
-        if (t.classList.contains("tile") || t.classList.contains("banner")) {
+        if (t.classList.contains("tile") || t.classList.contains("banner") || t.classList.contains("lost-line")) {
           const el = $(".section-head");
           if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
         }

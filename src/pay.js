@@ -23,6 +23,7 @@ import {
 } from "./pay-util.js";
 import {
   ensureSchema, generate, cleanPlan, addFirstPlan, switchPlan, finishClient, editPlan, deletePlan, clientStatus, currentPlan, planLabel,
+  markMissed, unmarkMissed, missedInfo, MISSED_NEXT,
 } from "./pay-plans.js";
 import { vapidKeys, pushAll } from "./pay-push.js";
 import { handleLogsApp } from "./logs.js";
@@ -313,16 +314,22 @@ async function getData(env) {
   const [c, p, pl, subs] = await db.batch([
     db.prepare("SELECT id, name, phone, tenure, package, programme_weeks, price_pence, method, notes, finished_on, created_at FROM pay_clients ORDER BY name COLLATE NOCASE"),
     db.prepare(
-      "SELECT id, client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, chased_at, chase_count FROM pay_payments ORDER BY due_date, id"
+      "SELECT id, client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, chased_at, chase_count, missed_on, missed_undo FROM pay_payments ORDER BY due_date, id"
     ),
     db.prepare("SELECT * FROM pay_plans ORDER BY client_id, start_date, id"),
     db.prepare("SELECT COUNT(*) AS n FROM pay_push_subs"),
   ]);
+  const payments = p.results.map(({ missed_undo, ...x }) => {
+    if (!x.missed_on) return x;
+    const client = c.results.find((k) => k.id === x.client_id);
+    const plans = pl.results.filter((k) => k.client_id === x.client_id);
+    return { ...x, ...missedInfo({ ...x, missed_undo }, plans, client) };
+  });
   return {
     today: londonToday(),
     trackStart: TRACK_START,
     clients: c.results,
-    payments: p.results,
+    payments,
     plans: pl.results,
     settings: await getSettings(db),
     pushDevices: subs.results[0].n,
@@ -409,7 +416,7 @@ async function exportCsv(env, type) {
       ["Client", "Package", "Programme length (weeks)", "Amount (£)", "Due date", "Payment method", "Status", "Paid date", "From plan", "Times chased", "Notes"],
       ...data.payments.map((p) => [
         byId[p.client_id]?.name || "(deleted client)", PKG_LABEL[p.package], p.programme_weeks || "", pounds(p.amount_pence), ukDate(p.due_date),
-        METHOD_LABEL[p.method], p.paid_date ? "Paid" : p.due_date < today ? "Overdue" : "Unpaid", ukDate(p.paid_date), p.auto ? "Yes" : "No",
+        METHOD_LABEL[p.method], p.paid_date ? "Paid" : p.missed_on ? "Didn't pay" : p.due_date < today ? "Overdue" : "Unpaid", ukDate(p.paid_date), p.auto ? "Yes" : "No",
         p.chase_count || 0, p.notes,
       ]),
     ];
@@ -425,23 +432,24 @@ export function composeNudge(data, weekday) {
   const today = data.today;
   const yesterday = addDays(today, -1);
   const first = (id) => (data.clients.find((c) => c.id === id)?.name || "Client").split(/\s+/)[0];
-  const unpaid = data.payments.filter((p) => !p.paid_date);
-  const dueToday = unpaid.filter((p) => p.due_date === today);
-  const missed = unpaid.filter((p) => p.due_date === yesterday);
-  const overdue = unpaid.filter((p) => p.due_date < today);
+  // payments marked "didn't pay" aren't owed any more, so they're never nudged about
+  const open = data.payments.filter((p) => !p.paid_date && !p.missed_on);
+  const dueToday = open.filter((p) => p.due_date === today);
+  const lateNew = open.filter((p) => p.due_date === yesterday);
+  const overdue = open.filter((p) => p.due_date < today);
   const ending = data.plans.filter((p) => p.end_date === today && p.then_action === "decide" && !p.decided);
   const list = (ps) => ps.slice(0, 3).map((p) => `${first(p.client_id)} ${money(p.amount_pence)}`).join(", ") + (ps.length > 3 ? ` +${ps.length - 3} more` : "");
   const lines = [];
   if (dueToday.length) lines.push(`Due today: ${list(dueToday)}`);
-  if (missed.length) lines.push(`Didn't land yesterday: ${list(missed)}`);
+  if (lateNew.length) lines.push(`Didn't land yesterday: ${list(lateNew)}. Chase, or mark as didn't pay?`);
   for (const p of ending.slice(0, 2)) lines.push(`${first(p.client_id)}'s ${planLabel(p).toLowerCase()} ends today. What's next?`);
   const monday = weekday === "Mon";
   if (!lines.length && !(monday && overdue.length)) return null;
-  if (monday && overdue.length > missed.length) lines.push(`Still overdue: ${plural(overdue.length, "payment")}, ${money(sumP(overdue))}`);
+  if (monday && overdue.length > lateNew.length) lines.push(`Still overdue: ${plural(overdue.length, "payment")}, ${money(sumP(overdue))}`);
   const title = dueToday.length
     ? `${dueToday.length} due today · ${money(sumP(dueToday))}`
-    : missed.length
-    ? `${plural(missed.length, "payment")} didn't land`
+    : lateNew.length
+    ? `${plural(lateNew.length, "payment")} didn't land`
     : ending.length
     ? "A plan ends today"
     : `${overdue.length} overdue · ${money(sumP(overdue))}`;
@@ -816,7 +824,7 @@ export async function handlePay(req, env, url, ctx) {
         .run();
       return json({ ok: true, data: await getData(env) });
     }
-    if ((m = path.match(/^\/payments\/(\d+)(\/paid|\/chase)?$/))) {
+    if ((m = path.match(/^\/payments\/(\d+)(\/paid|\/chase|\/missed)?$/))) {
       const id = idFrom(m[1]);
       const existing = await db.prepare("SELECT * FROM pay_payments WHERE id = ?").bind(id).first();
       if (!existing) bad("Payment not found");
@@ -824,7 +832,21 @@ export async function handlePay(req, env, url, ctx) {
         const b = await readBody(req);
         const paid = b.paid_date === null ? null : b.paid_date || today;
         if (paid !== null && !isDate(paid)) bad("Paid date isn't valid");
+        if (existing.missed_on && paid) {
+          // they paid after all: no longer lost, and (unless told otherwise) their service picks up again
+          const r = await unmarkMissed(db, existing, { paidDate: paid, restart: b.restart !== false });
+          return json({ ok: true, restored: r.restored, data: await getData(env) });
+        }
         await db.prepare("UPDATE pay_payments SET paid_date = ?, updated_at = ? WHERE id = ?").bind(paid, now, id).run();
+        return json({ ok: true, data: await getData(env) });
+      }
+      if (m[2] === "/missed" && method === "POST") {
+        const b = await readBody(req);
+        if (b.undo) {
+          const r = await unmarkMissed(db, existing, { restart: true });
+          return json({ ok: true, restored: r.restored, data: await getData(env) });
+        }
+        await markMissed(db, existing, MISSED_NEXT.includes(b.next) ? b.next : bad("Pick what happens next"));
         return json({ ok: true, data: await getData(env) });
       }
       if (m[2] === "/chase" && method === "POST") {
@@ -838,10 +860,12 @@ export async function handlePay(req, env, url, ctx) {
         const p = cleanPayment(await readBody(req));
         await requireClient(db, p.client_id);
         if (existing.auto && p.client_id !== existing.client_id) bad("This payment comes from a plan, so it stays with that client.");
+        // marked paid here: it isn't lost any more (their plan stays as it is; "paid after all" restarts it)
+        const unmiss = existing.missed_on && p.paid_date ? ", missed_on = NULL, missed_undo = NULL" : "";
         try {
           await db
             .prepare(
-              "UPDATE pay_payments SET client_id=?, package=?, programme_weeks=?, amount_pence=?, due_date=?, method=?, paid_date=?, notes=?, updated_at=? WHERE id=?"
+              `UPDATE pay_payments SET client_id=?, package=?, programme_weeks=?, amount_pence=?, due_date=?, method=?, paid_date=?, notes=?, updated_at=?${unmiss} WHERE id=?`
             )
             .bind(p.client_id, p.package, p.programme_weeks, p.amount_pence, p.due_date, p.method, p.paid_date, p.notes, now, id)
             .run();
