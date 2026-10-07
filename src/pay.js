@@ -73,6 +73,7 @@ function safeEqual(a, b) {
   if (A.length !== B.length) return false;
   return crypto.subtle.timingSafeEqual(A, B);
 }
+const SKIP_REASONS = ["holiday", "ill", "money", "other"];
 const sumP = (ps) => ps.reduce((a, p) => a + p.amount_pence, 0);
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
@@ -310,13 +311,14 @@ async function getData(env) {
   const db = env.PAY_DB;
   await ensureSchema(db);
   await generate(db);
-  const [c, p, pl, subs] = await db.batch([
+  const [c, p, pl, subs, sk] = await db.batch([
     db.prepare("SELECT id, name, phone, tenure, package, programme_weeks, price_pence, method, notes, finished_on, created_at FROM pay_clients ORDER BY name COLLATE NOCASE"),
     db.prepare(
       "SELECT id, client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, chased_at, chase_count FROM pay_payments ORDER BY due_date, id"
     ),
     db.prepare("SELECT * FROM pay_plans ORDER BY client_id, start_date, id"),
     db.prepare("SELECT COUNT(*) AS n FROM pay_push_subs"),
+    db.prepare("SELECT * FROM pay_skips ORDER BY due_date, id"),
   ]);
   return {
     today: londonToday(),
@@ -324,6 +326,7 @@ async function getData(env) {
     clients: c.results,
     payments: p.results,
     plans: pl.results,
+    skips: sk.results,
     settings: await getSettings(db),
     pushDevices: subs.results[0].n,
   };
@@ -780,6 +783,7 @@ export async function handlePay(req, env, url, ctx) {
         if (n.n > 0) bad("This client has payments. Mark them as finished instead so the history stays.");
         await db.batch([
           db.prepare("DELETE FROM pay_plans WHERE client_id = ?").bind(id),
+          db.prepare("DELETE FROM pay_skips WHERE client_id = ?").bind(id),
           db.prepare("DELETE FROM pay_clients WHERE id = ?").bind(id),
         ]);
         return json({ ok: true, data: await getData(env) });
@@ -816,7 +820,7 @@ export async function handlePay(req, env, url, ctx) {
         .run();
       return json({ ok: true, data: await getData(env) });
     }
-    if ((m = path.match(/^\/payments\/(\d+)(\/paid|\/chase)?$/))) {
+    if ((m = path.match(/^\/payments\/(\d+)(\/paid|\/chase|\/skip)?$/))) {
       const id = idFrom(m[1]);
       const existing = await db.prepare("SELECT * FROM pay_payments WHERE id = ?").bind(id).first();
       if (!existing) bad("Payment not found");
@@ -826,6 +830,22 @@ export async function handlePay(req, env, url, ctx) {
         if (paid !== null && !isDate(paid)) bad("Paid date isn't valid");
         await db.prepare("UPDATE pay_payments SET paid_date = ?, updated_at = ? WHERE id = ?").bind(paid, now, id).run();
         return json({ ok: true, data: await getData(env) });
+      }
+      if (m[2] === "/skip" && method === "POST") {
+        if (existing.paid_date) bad("This payment is already paid, so it can't be skipped.");
+        const b = await readBody(req);
+        const reason = SKIP_REASONS.includes(b.reason) ? b.reason : "other";
+        const notes = String(b.notes ?? "").trim().slice(0, 500);
+        const r = await db.batch([
+          db
+            .prepare(
+              `INSERT INTO pay_skips (client_id, plan_id, package, programme_weeks, amount_pence, due_date, method, reason, notes, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+            )
+            .bind(existing.client_id, existing.auto ? existing.plan_id : null, existing.package, existing.programme_weeks, existing.amount_pence, existing.due_date, existing.method, reason, notes || existing.notes || "", now),
+          db.prepare("DELETE FROM pay_payments WHERE id = ?").bind(id),
+        ]);
+        return json({ ok: true, skipId: r[0].results[0].id, data: await getData(env) });
       }
       if (m[2] === "/chase" && method === "POST") {
         const r = await db
@@ -855,6 +875,28 @@ export async function handlePay(req, env, url, ctx) {
         await db.prepare("DELETE FROM pay_payments WHERE id = ?").bind(id).run();
         return json({ ok: true, data: await getData(env) });
       }
+    }
+
+    // ----- skipped payments: undo puts the payment back exactly as it was -----
+    if ((m = path.match(/^\/skips\/(\d+)$/)) && method === "DELETE") {
+      const id = idFrom(m[1]);
+      const s = await db.prepare("SELECT * FROM pay_skips WHERE id = ?").bind(id).first();
+      if (!s) bad("That skip has already been undone.");
+      try {
+        await db.batch([
+          db.prepare("DELETE FROM pay_skips WHERE id = ?").bind(id),
+          db
+            .prepare(
+              `INSERT INTO pay_payments (client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`
+            )
+            .bind(s.client_id, s.plan_id, s.plan_id ? 1 : 0, s.package, s.programme_weeks, s.amount_pence, s.due_date, s.method, s.notes, now, now),
+        ]);
+      } catch (e) {
+        if (/UNIQUE/i.test(String(e && e.message))) bad("There's already a payment from this plan on that date.");
+        throw e;
+      }
+      return json({ ok: true, data: await getData(env) });
     }
 
     throw new HttpError(404, "Not found");

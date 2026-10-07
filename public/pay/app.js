@@ -180,6 +180,7 @@
     cStatus: "active",
     cq: "",
     mixMode: "month",
+    lostMode: "month",
     trendSel: null,
     trendTable: false,
     platformAuth: false,
@@ -857,6 +858,10 @@
           <div class="fill" data-pct="${pct}" style="width:${S.counts.pct ?? 0}%"><span class="knob">${count("pct", pct, "pct")}</span></div>
         </div>
         <div class="progress-legend"><span>Collected ${money(st.collected)}</span><span>Left ${money(st.unpaidSum)}</span></div>
+        ${(() => {
+          const lost = mk <= cur ? lostIn([mk]) : sum(skipsOf(null).filter((x) => mKey(x.due_date) === mk));
+          return lost ? `<button class="lost-line" data-tab="growth">Lost ${money(lost)} to breaks and skipped payments ${ic("arrow")}</button>` : "";
+        })()}
       </section>
 
       <div class="tiles">
@@ -1253,6 +1258,12 @@
         }
       </div>
       ${(() => {
+        const lost = lostIn(lostMonths(), c.id);
+        if (!lost) return "";
+        const bn = breaksNow().find((x) => x.c.id === c.id);
+        return `<div class="lost-client rise" style="--i:5"><div><span class="k">Lost to breaks and skips</span><b class="num">−${money(lost)}</b></div><small>${bn ? `On a break${bn.b.end_date ? ` until ${fmtDay(bn.b.end_date)}` : " with no return date"} · costing ${money(bn.perMonth)}/month` : "Since tracking began"}</small></div>`;
+      })()}
+      ${(() => {
         const h = payHabit(c.id);
         return h.n ? `<div class="habit-line rise" style="--i:5"><span class="k">Pay habit</span>${habitTag(h)}<small>${esc(h.line)}</small></div>` : "";
       })()}
@@ -1282,7 +1293,18 @@
         ps.length
           ? `<div class="list">${ps.map((p) => prow(p, { showClient: false })).join("")}</div>`
           : `<div class="empty"><b>No payments yet</b><button class="btn sm" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add a payment</button></div>`
-      }`;
+      }
+      ${(() => {
+        const sk = skipsOf(c.id).slice().reverse();
+        return sk.length
+          ? `<div class="section-head"><h2 class="sm">Skipped</h2><span style="color:var(--muted);font-size:14px">−${money(sum(sk))}</span></div>
+             <div class="skips">${sk
+               .map(
+                 (x) => `<div class="skip-row"><span class="n">${fmtShort(x.due_date)} · ${esc(pkgText(x.package, x.programme_weeks))}<small>${esc(SKIP_REASON[x.reason] || "Other")}${x.notes ? " · " + esc(x.notes) : ""}</small></span><span class="lost-amt num">−${money(x.amount_pence)}</span><button class="btn sm ghost" data-unskip="${x.id}">Undo</button></div>`
+               )
+               .join("")}</div>`
+          : "";
+      })()}`;
   }
 
   // ---------- Growth ----------
@@ -1349,9 +1371,119 @@
         income += v;
         if (v > 0) clients++;
       }
-      out.push({ k, income, clients, now: k === mKey(today) });
+      out.push({ k, income, clients, lost: lostIn([k]), now: k === mKey(today) });
     }
     return out;
+  }
+
+  // ---------- lost money ----------
+  // Two ways money goes missing without a client leaving:
+  //   a break: what their last paid plan was worth per month, for each day of the break (open-ended breaks count up to the end of this month)
+  //   a skipped payment: the full amount, in the month it was due
+  // Clients who finish are counted separately ("gone for good"), as what their plan was worth per month.
+  const SKIP_REASON = { holiday: "Holiday", ill: "Ill or injured", money: "Money's tight", other: "Other" };
+  const skipsOf = (cid) => (S.data.skips || []).filter((x) => cid == null || x.client_id === cid);
+  function breakLoss(b, mk) {
+    const c = client(b.client_id);
+    if (!c) return 0;
+    const v = monthlyValue(planBefore(b));
+    if (!v) return 0;
+    const today = londonToday();
+    if (mk > mKey(today)) return 0;
+    const ms = mk + "-01";
+    const me = occurrence(mk, 31);
+    let end = b.end_date || me;
+    if (c.finished_on && c.finished_on < end) end = c.finished_on;
+    const from = [b.start_date, ms, TRACK_START].sort().pop();
+    const to = end < me ? end : me;
+    if (to < from) return 0;
+    return Math.round((v * (daysBetween(from, to) + 1)) / daysIn(mk) / 100) * 100; // an estimate, so whole pounds
+  }
+  function lostMonths() {
+    const out = [];
+    for (let k = mKey(TRACK_START); k <= mKey(londonToday()); k = addMonths(k, 1)) out.push(k);
+    return out;
+  }
+  // every lost item for the given months (one month, or all of them)
+  function lostItems(months, cid = null) {
+    const set = new Set(months);
+    const items = [];
+    for (const b of S.data.plans) {
+      if (b.kind !== "break" || (cid != null && b.client_id !== cid)) continue;
+      const amt = months.reduce((a, k) => a + breakLoss(b, k), 0);
+      if (!amt) continue;
+      const prev = planBefore(b);
+      const open = !b.end_date || b.end_date >= londonToday();
+      const when = b.end_date ? `${fmtDay(b.start_date)} → ${fmtDay(b.end_date)}` : `since ${fmtDay(b.start_date)}`;
+      items.push({ kind: "break", c: client(b.client_id), amount: amt, open, noReturn: !b.end_date, perMonth: monthlyValue(prev), sub: `On a break · ${when}`, date: b.start_date });
+    }
+    for (const x of skipsOf(cid)) {
+      if (!set.has(mKey(x.due_date))) continue;
+      items.push({ kind: "skip", id: x.id, c: client(x.client_id), amount: x.amount_pence, sub: `Skipped the ${fmtDay(x.due_date)} payment · ${SKIP_REASON[x.reason] || "Other"}${x.notes ? " · " + x.notes : ""}`, date: x.due_date });
+    }
+    return items.sort((a, b) => b.amount - a.amount || (a.date < b.date ? 1 : -1));
+  }
+  const lostIn = (months, cid = null) => lostItems(months, cid).reduce((a, x) => a + x.amount, 0);
+  // clients who finished in these months, and what their plan was worth per month
+  function goneFor(months) {
+    const set = new Set(months);
+    return S.data.clients
+      .filter((c) => c.finished_on && set.has(mKey(c.finished_on)))
+      .map((c) => ({ c, perMonth: monthlyValue(plansOf(c.id).filter((p) => p.kind !== "break" && p.start_date <= c.finished_on).pop()) }))
+      .filter((x) => x.perMonth > 0);
+  }
+  // what's not coming in right now because of breaks still running
+  function breaksNow() {
+    const today = londonToday();
+    return S.data.clients
+      .map((c) => {
+        const b = curPlan(c.id);
+        if (!b || b.kind !== "break" || statusOf(c) === "finished") return null;
+        const v = monthlyValue(planBefore(b));
+        return v ? { c, b, perMonth: v } : null;
+      })
+      .filter(Boolean);
+  }
+  function lostCard(i) {
+    const cur = mKey(londonToday());
+    const months = S.lostMode === "all" ? lostMonths() : [cur];
+    const items = lostItems(months);
+    const total = items.reduce((a, x) => a + x.amount, 0);
+    const brk = items.filter((x) => x.kind === "break").reduce((a, x) => a + x.amount, 0);
+    const skp = total - brk;
+    const now = breaksNow();
+    const nowPm = now.reduce((a, x) => a + x.perMonth, 0);
+    const noReturn = now.filter((x) => !x.b.end_date);
+    const gone = goneFor(months);
+    const gonePm = gone.reduce((a, x) => a + x.perMonth, 0);
+    return `<section class="chart-card lost-card rise" style="--i:${i}">
+      <div class="cc-head"><h3>Money lost</h3><span class="hint" style="padding:0">breaks and skipped payments</span></div>
+      <div class="seg small full" data-seg="lost">
+        <button class="${S.lostMode === "month" ? "on" : ""}" data-lost="month">${mName(cur)}</button>
+        <button class="${S.lostMode === "all" ? "on" : ""}" data-lost="all">Since ${mShort(mKey(TRACK_START))} ${TRACK_START.slice(0, 4)}</button>
+      </div>
+      <div class="lost-hero"><b class="num">${total ? "−" : ""}${count("lost-" + S.lostMode, total)}</b><span>lost ${S.lostMode === "all" ? "since tracking began" : "in " + mName(cur)}</span></div>
+      ${
+        total
+          ? `<div class="kpi-lines">
+               <p><span>To breaks</span><b class="num">${money(brk)}</b></p>
+               <p><span>To skipped payments</span><b class="num">${money(skp)}</b></p>
+             </div>
+             <div class="habits">${items
+               .map(
+                 (x) => `<button class="habit-row" data-open-client="${x.c?.id || ""}"><span class="n">${esc(x.c?.name || "Deleted client")}<small>${esc(x.sub)}${x.kind === "break" && x.open ? ` · costing ${money(x.perMonth)}/month` : ""}</small>${x.kind === "break" && x.noReturn ? `<span class="habit bad">No return date</span>` : ""}</span><span class="lost-amt num">−${money(x.amount)}</span></button>`
+               )
+               .join("")}</div>`
+          : `<p class="cc-note">Nothing lost ${S.lostMode === "all" ? "yet" : "this month"}. Breaks and skipped payments show up here.</p>`
+      }
+      ${
+        nowPm
+          ? `<div class="lost-now"><b class="num">${money(nowPm)}/month</b> isn't coming in while ${plural(now.length, "client")} ${now.length === 1 ? "is" : "are"} on a break${noReturn.length ? ` · ${noReturn.length} with no return date` : ""}</div>`
+          : ""
+      }
+      ${gonePm ? `<p class="cc-note">Also gone for good: ${money(gonePm)}/month from ${plural(gone.length, "client")} who finished${S.lostMode === "all" ? "" : " this month"}. Not counted above.</p>` : ""}
+      <p class="cc-note">A break counts what their last plan was worth per month. A skipped payment counts its full amount.</p>
+    </section>`;
   }
 
   function viewGrowth() {
@@ -1459,6 +1591,8 @@
         }
       </section>
 
+      ${lostCard(1)}
+
       <section class="chart-card dark rise" style="--i:1">
         <div class="cc-head"><h3>Money in by month</h3>
           <div class="legend"><span><i class="sw got"></i>Received</span><span><i class="sw due"></i>Due</span></div></div>
@@ -1537,6 +1671,7 @@
               <p class="gm-sub">${plural(g.clients, "paying client")}${
                 prev ? ` · ${sign(dI, (v) => pounds0(v) + "/mo")} · ${sign(dC, (v) => plural(v, "client"))} on ${mName(prev.k)}` : " · starting point"
               }</p>
+              ${g.lost ? `<p class="gm-sub lost-sub">Lost ${money(g.lost)} to breaks and skips</p>` : ""}
             </div>`;
           })
           .join("")}</div>
@@ -1805,6 +1940,42 @@
     };
   }
 
+  function skipSheet(p) {
+    const F = { reason: "holiday" };
+    const html = `
+      <form class="form" id="skipForm" novalidate>
+        <p class="hint">${esc(firstName(cname(p)))} won't pay the ${money(p.amount_pence)} due ${fmtLong(p.due_date)}. It comes off what's due and shows as money lost on Growth. Their plan carries on as normal.</p>
+        <div class="field"><span class="lab">Why</span>${opts("reason", SKIP_REASON, F.reason)}</div>
+        <div class="field"><label for="s-notes">Notes <span>optional</span></label><textarea id="s-notes" rows="2" placeholder="Back on the 1st, said she'd make it up"></textarea></div>
+        <div class="form-err" id="s-err"></div>
+        <button class="btn lime" type="submit">Skip ${money(p.amount_pence)}</button>
+      </form>`;
+    openSheet(`Skip ${firstName(cname(p))}'s payment`, html, (sh) => {
+      $("#skipForm", sh).onsubmit = async (e) => {
+        e.preventDefault();
+        try {
+          const r = await api(`/payments/${p.id}/skip`, { method: "POST", body: { reason: $('[data-name="reason"]', sh).dataset.value || "other", notes: $("#s-notes", sh).value } });
+          setData(r.data);
+          closeSheet();
+          rerender();
+          toast(`Skipped · ${money(p.amount_pence)} lost`, [{ label: "Undo", fn: () => unskip(r.skipId) }]);
+        } catch (err) {
+          $("#s-err", sh).textContent = err.message || "Couldn't skip that. Try again.";
+        }
+      };
+    });
+  }
+  async function unskip(id) {
+    try {
+      const r = await api(`/skips/${id}`, { method: "DELETE" });
+      setData(r.data);
+      rerender();
+      toast("Payment put back");
+    } catch (e) {
+      fail(e);
+    }
+  }
+
   function paymentSheet(p, preset = {}) {
     if (!S.data.clients.length) {
       toast("Add a client first.");
@@ -1849,6 +2020,7 @@
         <div class="field"><label for="p-notes">Notes <span>optional</span></label><textarea id="p-notes" rows="2">${esc(f.notes)}</textarea></div>
         <div class="form-err" id="p-err"></div>
         <button class="btn lime" type="submit">${isEdit ? "Save changes" : "Add payment"}</button>
+        ${isEdit && !p.paid_date ? `<button class="btn ghost" type="button" id="p-skip">${ic("pause")} Skip this payment</button><p class="hint center">Skipping keeps it as money lost. Delete is only for mistakes.</p>` : ""}
         ${isEdit ? `<button class="btn danger" type="button" id="p-del">Delete this payment</button>` : ""}
         ${plan ? `<button class="linkish center" type="button" data-open-client="${p.client_id}" data-close-sheet>View ${esc(firstName(cname(p)))}'s plans</button>` : ""}
       </form>`;
@@ -1874,6 +2046,8 @@
       } else {
         const paid = $("#p-paid", sh);
         paid.addEventListener("change", () => ($("#p-paid-f", sh).hidden = !paid.checked));
+        const skipBtn = $("#p-skip", sh);
+        if (skipBtn) skipBtn.onclick = () => skipSheet(p);
         $("#p-del", sh).onclick = async () => {
           if (!confirm(`Delete this ${money(p.amount_pence)} payment from ${cname(p)}? This can't be undone.`)) return;
           try {
@@ -2909,7 +3083,7 @@
         return;
       }
       const t = e.target.closest(
-        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix]"
+        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix],[data-lost],[data-unskip]"
       );
       if (!t || t.disabled) return;
       const d = t.dataset;
@@ -2954,6 +3128,11 @@
         S.mixMode = d.mix;
         return rerender();
       }
+      if (d.lost) {
+        S.lostMode = d.lost;
+        return rerender();
+      }
+      if (d.unskip) return unskip(Number(d.unskip));
       if (d.action) {
         switch (d.action) {
           case "add":

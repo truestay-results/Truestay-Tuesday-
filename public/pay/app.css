@@ -27,6 +27,7 @@
   --on-lime: #1B1C19;
   --red: #E9483C;
   --red-soft: #FBE1DD;
+  --red-on-card: #FF9187; /* red text on the dark hero cards, both themes (6.9:1 on --card) */
   --red-ink: #B42B20;
   --amber: #E89A1C;
   --amber-soft: #FBEBCF;
@@ -1001,3 +1002,32 @@ button.tile:disabled:active { transform: none; }
 .gm-bar { display: block; height: 6px; border-radius: 999px; background: var(--surface-2); margin: 8px 0 6px; overflow: hidden; }
 .gm-bar i { display: block; height: 100%; border-radius: inherit; background: var(--ink); }
 .gm-sub { font-size: 13px; color: var(--muted); }
+
+/* v5: money lost (breaks and skipped payments) */
+.lost-hero { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; margin: 14px 0 6px; }
+.lost-hero b { font-size: 34px; font-weight: 600; letter-spacing: -0.03em; color: var(--red-ink); }
+.lost-hero b span { color: inherit; font-size: inherit; }
+.lost-hero > span { color: var(--muted); font-size: 14px; }
+.lost-amt { flex: none; font-weight: 600; color: var(--red-ink); }
+.lost-card .habit-row .habit { margin-top: 6px; }
+.lost-now { margin-top: 12px; padding: 12px 14px; border-radius: var(--r-md); background: var(--red-soft); color: var(--ink); font-size: 14px; line-height: 1.4; }
+.lost-now b { color: var(--red-ink); }
+.lost-line {
+  position: relative; display: inline-flex; align-items: center; gap: 6px; margin-top: 12px; min-height: 32px;
+  font-size: 14px; font-weight: 600; color: var(--red-on-card); text-align: left;
+}
+.lost-line svg { width: 14px; height: 14px; flex: none; }
+.lost-line::after { content: ""; position: absolute; inset: min(0px, calc((100% - 44px) / 2)); }
+.lost-sub { color: var(--red-ink); }
+.lost-client { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-md); padding: 12px 14px; margin: 12px 0 4px; }
+.lost-client > div { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; }
+.lost-client .k { font-weight: 600; font-size: 14px; }
+.lost-client b { font-size: 20px; font-weight: 600; color: var(--red-ink); }
+.lost-client small { display: block; color: var(--muted); font-size: 13px; margin-top: 2px; }
+.skips { background: var(--surface); border-radius: var(--r-md); padding: 2px 12px; }
+.skip-row { display: flex; align-items: center; gap: 10px; min-height: 56px; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.skip-row:last-child { border-bottom: 0; }
+.skip-row .n { flex: 1; min-width: 0; font-weight: 600; font-size: 15px; }
+.skip-row .n small { display: block; font-weight: 400; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.skip-row .btn.sm { min-height: 44px; flex: none; }
+.hint.center { text-align: center; margin-top: -4px; }

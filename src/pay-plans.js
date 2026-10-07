@@ -51,6 +51,17 @@ export async function ensureSchema(db) {
       )`)
     );
   }
+  if (!tables.has("pay_skips")) {
+    stmts.push(
+      db.prepare(`CREATE TABLE pay_skips (
+        id INTEGER PRIMARY KEY, client_id INTEGER NOT NULL, plan_id INTEGER, package TEXT NOT NULL, programme_weeks INTEGER,
+        amount_pence INTEGER NOT NULL, due_date TEXT NOT NULL, method TEXT NOT NULL, reason TEXT NOT NULL DEFAULT 'other',
+        notes TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL
+      )`),
+      db.prepare("CREATE INDEX IF NOT EXISTS pay_skips_client ON pay_skips(client_id)"),
+      db.prepare("CREATE INDEX IF NOT EXISTS pay_skips_plan_due ON pay_skips(plan_id, due_date)")
+    );
+  }
   if (!tables.has("pay_push_subs")) {
     stmts.push(
       db.prepare(`CREATE TABLE pay_push_subs (
@@ -218,9 +229,11 @@ function insertAuto(db, clientId, planId, p, due, amount, now) {
   return db
     .prepare(
       `INSERT OR IGNORE INTO pay_payments (client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, created_at, updated_at)
-       VALUES (?, ?, 1, ?, ?, ?, ?, ?, NULL, '', ?, ?)`
+       SELECT ?, ?, 1, ?, ?, ?, ?, ?, NULL, '', ?, ?
+       WHERE NOT EXISTS (SELECT 1 FROM pay_skips WHERE plan_id = ? AND due_date = ?)`
     )
-    .bind(clientId, planId, p.kind, p.programme_weeks, amount, due, p.method, now, now);
+    .bind(clientId, planId, p.kind, p.programme_weeks, amount, due, p.method, now, now, planId, due);
+// A skipped payment never comes back on its own: plan payments are not made again on a skipped date.
 }
 const splitAmounts = (total, n) => {
   const base = Math.floor(total / n);
