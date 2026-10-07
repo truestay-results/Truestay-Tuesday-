@@ -22,7 +22,7 @@
     [0, "Never"],
   ];
   const LOCK_GRACE_MS = 10000; // "every time": ignore quick glances at a notification
-  const TAB_ORDER = { month: 0, calendar: 1, clients: 3, growth: 4 };
+  const TAB_ORDER = { month: 0, calendar: 1, clients: 3, income: 4, growth: 5 };
   const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
   // ---------- tiny utils ----------
@@ -149,6 +149,7 @@
     swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/>',
     flag: '<path d="M5 21V4h11l-2 4 2 4H5"/>',
+    coins: '<ellipse cx="9" cy="7" rx="6" ry="3"/><path d="M3 7v5c0 1.7 2.7 3 6 3s6-1.3 6-3V7"/><path d="M9 15v2c0 1.7 2.7 3 6 3s6-1.3 6-3v-5c0-1.6-2.4-2.9-5.5-3"/>',
     faceid:
       '<path d="M3 8V6a3 3 0 0 1 3-3h2M16 3h2a3 3 0 0 1 3 3v2M21 16v2a3 3 0 0 1-3 3h-2M8 21H6a3 3 0 0 1-3-3v-2"/><path d="M8.5 9v1.5M15.5 9v1.5M12 9v4.5h-1"/><path d="M8.8 16.3c1.9 1.4 4.5 1.4 6.4 0"/>',
   };
@@ -181,6 +182,7 @@
     cq: "",
     mixMode: "month",
     lostMode: "month",
+    allRev: pref("allRev", "0") === "1",
     trendSel: null,
     trendTable: false,
     platformAuth: false,
@@ -805,12 +807,24 @@
     const mk = S.month;
     const today = londonToday();
     const cur = mKey(today);
-    const st = monthStats(mk);
+    const st0 = monthStats(mk);
+    const ist = incomeStats(mk);
+    const all = S.allRev;
+    const st = all
+      ? {
+          ...st0,
+          dueSum: st0.dueSum + ist.dueSum,
+          unpaidSum: st0.unpaidSum + ist.unpaidSum,
+          collected: st0.collected + ist.collected,
+          receivedSum: st0.receivedSum + ist.receivedSum,
+          overdueSum: st0.overdueSum + ist.overdueSum,
+        }
+      : st0;
     const name = S.session?.name ? ", " + esc(S.session.name) : "";
     const h = londonHour();
     const greet = h < 12 ? "Morning" : h < 17 ? "Afternoon" : "Evening";
     const range = monthRange();
-    const maxBar = Math.max(1, ...range.map((k) => sum(S.data.payments.filter((p) => mKey(p.due_date) === k))));
+    const maxBar = Math.max(1, ...range.map((k) => sum(S.data.payments.filter((p) => mKey(p.due_date) === k)) + (all ? incomeStats(k).dueSum : 0)));
     const idx = range.indexOf(mk);
     const pct = st.dueSum ? Math.round((st.collected / st.dueSum) * 100) : 0;
     const older = st.overdue.filter((p) => mKey(p.due_date) < mk);
@@ -835,8 +849,9 @@
         ${range
           .map((k, i) => {
             const ps = S.data.payments.filter((p) => mKey(p.due_date) === k);
-            const due = sum(ps);
-            const got = sum(ps.filter((p) => p.paid_date));
+            const ik = all ? incomeStats(k) : null;
+            const due = sum(ps) + (ik ? ik.dueSum : 0);
+            const got = sum(ps.filter((p) => p.paid_date)) + (ik ? ik.collected : 0);
             const hh = Math.round((due / maxBar) * 40);
             const hg = due ? Math.round((got / due) * hh) : 0;
             return `<button class="mpill${k === mk ? " sel" : ""}${k === cur ? " now" : ""}" data-month="${k}" style="--i:${i}" aria-label="${mLabel(k)}">
@@ -851,9 +866,13 @@
 
       <section class="hero rise ${S.heroAnim}" style="--i:2" id="hero">
         ${rings}
-        <div class="k">Due in ${mName(mk)}</div>
+        <div class="k"><span>Due in ${mName(mk)}</span><button class="rev-toggle${all ? " on" : ""}" data-action="all-rev" aria-pressed="${all}">${all ? ic("check") + " " : ""}All revenue</button></div>
         <div class="big">${count("due", st.dueSum, "big")}</div>
-        <div class="sub">${plural(st.due.length, "payment")} scheduled · ${money(st.collected)} of it paid</div>
+        <div class="sub">${
+          all
+            ? `${money(st0.dueSum)} from clients · ${money(ist.dueSum)} other income · ${money(st.collected)} of it in`
+            : `${plural(st.due.length, "payment")} scheduled · ${money(st.collected)} of it paid`
+        }</div>
         <div class="progress" role="img" aria-label="${pct}% of this month's payments collected">
           <div class="fill" data-pct="${pct}" style="width:${S.counts.pct ?? 0}%"><span class="knob">${count("pct", pct, "pct")}</span></div>
         </div>
@@ -869,21 +888,27 @@
           <span class="arrow">${ic("arrow")}</span>
           <div class="k">Received in ${mName(mk)}</div>
           <div class="v">${count("recv", st.receivedSum, "big")}</div>
-          <div class="s">${plural(st.received.length, "payment")} actually landed, by paid date</div>
+          <div class="s">${all ? `${money(st0.receivedSum)} clients · ${money(ist.receivedSum)} other` : `${plural(st.received.length, "payment")} actually landed, by paid date`}</div>
         </button>
         <button class="tile rise" style="--i:4" data-scope="month" data-status="notpaid">
           <span class="arrow">${ic("arrow")}</span>
           <div class="k">Still unpaid</div>
           <div class="v">${count("unpaid", st.unpaidSum)}</div>
-          <div class="s">${plural(st.unpaid.length, "payment")} due in ${mShort(mk)}</div>
+          <div class="s">${plural(st.unpaid.length + (all ? ist.unpaid.length : 0), all ? "item" : "payment")} due in ${mShort(mk)}</div>
         </button>
         <button class="tile red rise${st.overdueSum ? " has" : ""}" style="--i:5" data-action="chase-list">
           <span class="arrow">${ic("chat")}</span>
           <div class="k">Overdue now</div>
           <div class="v">${count("overdue", st.overdueSum)}</div>
-          <div class="s">${st.overdue.length ? '<span class="live"></span>' + plural(st.overdue.length, "payment") + " · tap to chase" : "0 payments, all months"}</div>
+          <div class="s">${st.overdue.length ? '<span class="live"></span>' + plural(st.overdue.length, "payment") + " · tap to chase" : "0 payments, all months"}${all && ist.overdue.length ? ` · ${ist.overdue.length} other late` : ""}</div>
         </button>
       </div>
+      ${
+        all
+          ? `<div class="section-head"><h2 class="sm">Other income in ${mName(mk)}</h2><button class="linkish" data-tab="income">See all</button></div>
+             ${ist.due.length ? `<div class="list">${ist.due.map((e) => irow(e)).join("")}</div>` : `<div class="empty"><b>No other income in ${mName(mk)}</b><button class="btn sm" data-action="add-income">${ic("plus")} Add income</button></div>`}`
+          : ""
+      }
       ${mk === mKey(TRACK_START) ? `<p class="note">${ic("info")}<span>Tracking started on 28 September 2026, so September only includes payments from then on.</span></p>` : ""}
       ${mk > cur ? `<p class="note">${ic("info")}<span>Only shows payments already on the books. Monthly plans add theirs about a month ahead.</span></p>` : ""}
       ${
@@ -1819,6 +1844,7 @@
     ["calendar", "cal", "Calendar"],
     ["add", "plus", ""],
     ["clients", "users", "Clients"],
+    ["income", "coins", "Income"],
     ["growth", "trend", "Growth"],
   ];
   function renderShell() {
@@ -1888,7 +1914,7 @@
     }
     const v = $("#view");
     const y = window.scrollY;
-    const views = { month: viewMonth, calendar: viewCalendar, clients: viewClients, growth: viewGrowth, more: viewMore };
+    const views = { month: viewMonth, calendar: viewCalendar, clients: viewClients, income: viewIncome, growth: viewGrowth, more: viewMore };
     v.className = "view";
     v.innerHTML = views[S.tab]();
     if (mode) {
@@ -1938,6 +1964,294 @@
       amount_pence: p && p.kind !== "break" && p.price_pence ? (p.billing === "split" ? Math.round(p.price_pence / p.instalments) : p.price_pence) : null,
       method: p?.method || "manual",
     };
+  }
+
+  // ---------- other income ----------
+  const INC_TYPE = { classes: "Classes", online: "Online", products: "Products", affiliate: "Affiliate", job: "Another job", other: "Other" };
+  const srcOf = (id) => (S.data.incomeSources || []).find((x) => x.id === id);
+  const srcName = (e) => srcOf(e.source_id)?.name || "Deleted source";
+  const incAll = () => S.data.income || [];
+  const istOf = (e) => (e.received_date ? "paid" : e.due_date < londonToday() ? "overdue" : "unpaid");
+  function incomeStats(mk) {
+    const due = incAll().filter((e) => mKey(e.due_date) === mk);
+    const unpaid = due.filter((e) => !e.received_date);
+    const received = incAll().filter((e) => e.received_date && mKey(e.received_date) === mk);
+    const overdue = incAll().filter((e) => istOf(e) === "overdue");
+    const dueSum = sum(due);
+    const unpaidSum = sum(unpaid);
+    return { due, dueSum, unpaid, unpaidSum, received, receivedSum: sum(received), overdue, overdueSum: sum(overdue), collected: dueSum - unpaidSum };
+  }
+  const srcLine = (x) =>
+    x.repeat === "monthly"
+      ? `${money(x.amount_pence)}/month · on the ${ordinal(x.day_of_month)}${x.end_date ? (x.end_date < londonToday() ? ` · stopped ${fmtDay(x.end_date)}` : ` · until ${fmtDay(x.end_date)}`) : ""}`
+      : `One-off · ${fmtDay(x.start_date)}`;
+  const srcLive = (x) => x.repeat === "monthly" && (!x.end_date || x.end_date >= londonToday());
+  function irow(e) {
+    const st = istOf(e);
+    const src = srcOf(e.source_id);
+    const pill =
+      st === "paid"
+        ? `<span class="pill paid">Received ${fmtDay(e.received_date)}</span>`
+        : st === "overdue"
+        ? `<span class="pill overdue">Late · ${daysBetween(e.due_date, londonToday())}d</span>`
+        : `<span class="pill unpaid">Expected</span>`;
+    return `<div class="prow st-${st}" data-open-inc="${e.id}" role="button" tabindex="0">
+      <div class="av">${ic("coins")}</div>
+      <div class="main">
+        <div class="name">${esc(srcName(e))}</div>
+        <div class="meta">${esc(INC_TYPE[src?.type] || "Other")}${e.auto ? " " + ic("repeat") : ""}</div>
+        <div class="pills">${pill}</div>
+      </div>
+      <div class="right"><div class="amt num">${money(e.amount_pence)}</div><div class="when">${fmtShort(e.due_date)}</div></div>
+      ${
+        st === "paid"
+          ? `<div class="paydone" aria-label="Received">${ic("check")}</div>`
+          : `<button class="paybtn" data-inc-recv="${e.id}" aria-label="Mark ${esc(srcName(e))} as received">${ic("check")}</button>`
+      }
+    </div>`;
+  }
+  function viewIncome() {
+    const mk = S.month;
+    const cur = mKey(londonToday());
+    const range = monthRange();
+    const idx = range.indexOf(mk);
+    const ist = incomeStats(mk);
+    const cst = monthStats(mk);
+    const srcs = S.data.incomeSources || [];
+    const live = srcs.filter(srcLive);
+    const monthly = live.reduce((a, x) => a + x.amount_pence, 0);
+    const pct = ist.dueSum ? Math.round((ist.collected / ist.dueSum) * 100) : 0;
+    const total = cst.dueSum + ist.dueSum;
+    const share = total ? Math.round((ist.dueSum / total) * 100) : 0;
+    const gotBy = (id) => sum(incAll().filter((e) => e.source_id === id && e.received_date));
+    const byType = {};
+    for (const e of ist.due) {
+      const t = srcOf(e.source_id)?.type || "other";
+      byType[t] = (byType[t] || 0) + e.amount_pence;
+    }
+    return `
+      ${topbar("Other income", `<button class="btn sm lime" data-action="add-income">${ic("plus")} Add</button>${settingsBtn()}`)}
+      <div class="monthbar rise" style="--i:0">
+        <div class="m">${mLabel(mk)}${mk === cur ? "<small>this month</small>" : ""}</div>
+        <div class="navs">
+          <button class="round" data-month="${range[idx - 1] || ""}" ${idx > 0 ? "" : "disabled"} aria-label="Previous month">${ic("left")}</button>
+          <button class="round" data-month="${range[idx + 1] || ""}" ${idx < range.length - 1 ? "" : "disabled"} aria-label="Next month">${ic("right")}</button>
+        </div>
+      </div>
+      <section class="hero rise" style="--i:1">
+        ${rings}
+        <div class="k"><span>Other income due in ${mName(mk)}</span></div>
+        <div class="big">${count("inc-due", ist.dueSum, "big")}</div>
+        <div class="sub">${plural(ist.due.length, "item")} · ${money(ist.collected)} of it in${total ? ` · ${share}% of everything due this month` : ""}</div>
+        <div class="progress" role="img" aria-label="${pct}% received">
+          <div class="fill" data-pct="${pct}" style="width:${S.counts["inc-pct"] ?? 0}%"><span class="knob">${count("inc-pct", pct, "pct")}</span></div>
+        </div>
+        <div class="progress-legend"><span>Received ${money(ist.collected)}</span><span>Left ${money(ist.unpaidSum)}</span></div>
+      </section>
+      <div class="tiles">
+        <div class="tile lime rise" style="--i:2"><div class="k">Received in ${mName(mk)}</div><div class="v">${count("inc-recv", ist.receivedSum)}</div><div class="s">by the date it landed</div></div>
+        <div class="tile rise" style="--i:3"><div class="k">Regular</div><div class="v">${count("inc-run", monthly)}</div><div class="s">a month from ${plural(live.length, "repeat")}</div></div>
+      </div>
+      ${
+        Object.keys(byType).length > 1
+          ? `<div class="kpi-lines inc-types">${Object.entries(byType)
+              .sort((a, b) => b[1] - a[1])
+              .map(([t, v]) => `<p><span>${INC_TYPE[t]}</span><b class="num">${money(v)}</b></p>`)
+              .join("")}</div>`
+          : ""
+      }
+      <div class="section-head"><h2 class="sm">Due in ${mName(mk)}</h2><span style="color:var(--muted);font-size:14px">${ist.due.length ? money(ist.dueSum) : ""}</span></div>
+      ${
+        ist.due.length
+          ? `<div class="list">${ist.due.map((e) => irow(e)).join("")}</div>`
+          : `<div class="empty"><b>Nothing due in ${mName(mk)}</b><span>${srcs.length ? "Add a one-off, or check another month." : "Add money that doesn't come from client plans: classes, online sales, affiliate, another job."}</span><button class="btn sm lime" data-action="add-income">${ic("plus")} Add income</button></div>`
+      }
+      ${
+        srcs.length
+          ? `<div class="section-head"><h2 class="sm">Where it comes from</h2><span class="hint" style="padding:0">Tap one to change it</span></div>
+             <div class="list">${srcs
+               .slice()
+               .sort((a, b) => Number(srcLive(b)) - Number(srcLive(a)) || a.name.localeCompare(b.name))
+               .map(
+                 (x) => `<button class="src-row${srcLive(x) || x.repeat === "none" ? "" : " ended"}" data-open-src="${x.id}">
+                   <span class="av">${ic(x.repeat === "monthly" ? "repeat" : "coins")}</span>
+                   <span class="n">${esc(x.name)}<small>${esc(INC_TYPE[x.type])} · ${esc(srcLine(x))}</small></span>
+                   <span class="r num">${money(gotBy(x.id))}<small>received</small></span>
+                 </button>`
+               )
+               .join("")}</div>`
+          : ""
+      }`;
+  }
+  async function incReceived(id, date) {
+    const e = incAll().find((x) => x.id === id);
+    if (!e) return;
+    try {
+      const r = await api(`/income/${id}/received`, { method: "POST", body: { received_date: date } });
+      setData(r.data);
+      rerender();
+      if (date !== null) {
+        haptic();
+        toast(`${srcName(e)} · ${money(e.amount_pence)} received`, [{ label: "Undo", fn: () => incReceived(id, null) }]);
+      }
+    } catch (err) {
+      fail(err);
+    }
+  }
+  function incomeSourceSheet(src) {
+    const isEdit = !!src;
+    const today = londonToday();
+    const F = src ? { ...src } : { name: "", type: "classes", repeat: "none", amount_pence: null, start_date: today, day_of_month: null, end_date: null, notes: "" };
+    const html = `
+      <form class="form" id="srcForm" novalidate>
+        <div class="field"><label for="i-name">What is it</label><input id="i-name" autocomplete="off" maxlength="80" value="${esc(F.name)}" placeholder="Sunday bootcamp, gym cover, online plans"></div>
+        <div class="field"><span class="lab">Type</span>${opts("type", INC_TYPE, F.type)}</div>
+        ${isEdit ? "" : `<div class="field"><span class="lab">How often</span>${opts("repeat", { none: "One-off", monthly: "Every month" }, F.repeat)}</div>`}
+        <div class="two">
+          <div class="field"><label for="i-amt">Amount</label><div class="money"><span>£</span><input id="i-amt" inputmode="decimal" autocomplete="off" value="${moneyInput(F.amount_pence)}" placeholder="0"></div></div>
+          <div class="field"><label for="i-date" id="i-date-l">${F.repeat === "monthly" ? "First one" : "Date"}</label><input id="i-date" type="date" value="${F.start_date}"></div>
+        </div>
+        ${
+          isEdit
+            ? ""
+            : `<label class="check-row" id="i-recv-f" ${F.repeat === "none" ? "" : "hidden"}><span>Already received</span><span class="switch"><input type="checkbox" id="i-recv" aria-label="Already received"><i></i></span></label>`
+        }
+        ${isEdit && F.repeat === "monthly" ? `<p class="hint">Changes apply from today. Anything already received stays as it was.</p>` : ""}
+        <div class="field"><label for="i-notes">Notes <span>optional</span></label><textarea id="i-notes" rows="2">${esc(F.notes)}</textarea></div>
+        <div class="form-err" id="i-err"></div>
+        <button class="btn lime" type="submit">${isEdit ? "Save changes" : "Add income"}</button>
+        ${isEdit && srcLive(F) ? `<button class="btn ghost" type="button" id="i-stop">${ic("pause")} Stop it from today</button>` : ""}
+        ${isEdit ? `<button class="btn danger" type="button" id="i-del">Delete</button>` : ""}
+      </form>`;
+    openSheet(isEdit ? F.name : "Add other income", html, (sh) => {
+      const rep = $('[data-name="repeat"]', sh);
+      if (rep)
+        rep.addEventListener("click", () =>
+          setTimeout(() => {
+            const m = rep.dataset.value === "monthly";
+            $("#i-date-l", sh).textContent = m ? "First one" : "Date";
+            $("#i-recv-f", sh).hidden = m;
+          })
+        );
+      const stop = $("#i-stop", sh);
+      if (stop)
+        stop.onclick = async () => {
+          if (!confirm(`Stop ${F.name} from today? Anything already received stays.`)) return;
+          try {
+            const r = await api(`/income/sources/${F.id}/stop`, { method: "POST", body: { date: today } });
+            setData(r.data);
+            closeSheet();
+            rerender();
+            toast(`${F.name} stopped`);
+          } catch (e) {
+            fail(e);
+          }
+        };
+      const del = $("#i-del", sh);
+      if (del)
+        del.onclick = async () => {
+          if (!confirm(`Delete ${F.name} and everything expected from it?`)) return;
+          try {
+            const r = await api(`/income/sources/${F.id}`, { method: "DELETE" });
+            setData(r.data);
+            closeSheet();
+            rerender();
+            toast("Deleted");
+          } catch (e) {
+            fail(e);
+          }
+        };
+      $("#srcForm", sh).onsubmit = async (e) => {
+        e.preventDefault();
+        const err = $("#i-err", sh);
+        err.textContent = "";
+        const amt = parseMoney($("#i-amt", sh).value);
+        const body = {
+          name: $("#i-name", sh).value.trim(),
+          type: val(sh, "type") || "other",
+          repeat: isEdit ? F.repeat : val(sh, "repeat") || "none",
+          amount_pence: amt,
+          start_date: $("#i-date", sh).value,
+          notes: $("#i-notes", sh).value,
+        };
+        if (!body.name) return (err.textContent = "Give it a name.");
+        if (!amt) return (err.textContent = "Enter the amount.");
+        if (!body.start_date) return (err.textContent = "Pick a date.");
+        if (body.repeat === "monthly") body.day_of_month = Number(body.start_date.slice(8, 10));
+        if (!isEdit && body.repeat === "none" && $("#i-recv", sh).checked) {
+          body.received = true;
+          body.received_date = body.start_date <= today ? body.start_date : today;
+        }
+        try {
+          const r = await api(isEdit ? `/income/sources/${F.id}` : "/income/sources", { method: isEdit ? "PUT" : "POST", body });
+          setData(r.data);
+          closeSheet();
+          if (!isEdit && S.tab !== "income" && !(S.tab === "month" && S.allRev)) toast(`${body.name} added`, [{ label: "View", fn: () => goTab("income") }]);
+          else toast(isEdit ? "Saved" : `${body.name} added`);
+          rerender();
+        } catch (e2) {
+          err.textContent = e2.message;
+        }
+      };
+    });
+  }
+  function incomeEntrySheet(e) {
+    const src = srcOf(e.source_id);
+    const today = londonToday();
+    const st = istOf(e);
+    const html = `
+      <form class="form" id="incForm" novalidate>
+        ${src ? `<div class="from-plan">${ic(src.repeat === "monthly" ? "repeat" : "coins")}<span>${esc(src.name)} · ${esc(INC_TYPE[src.type])}<br><small>${esc(srcLine(src))}${src.repeat === "monthly" ? ". Changes here only affect this one." : ""}</small></span></div>` : ""}
+        <div class="two">
+          <div class="field"><label for="e-amt">Amount</label><div class="money"><span>£</span><input id="e-amt" inputmode="decimal" autocomplete="off" value="${moneyInput(e.amount_pence)}"></div></div>
+          <div class="field"><label for="e-due">Due</label><input id="e-due" type="date" value="${e.due_date}"></div>
+        </div>
+        <div class="status-card ${st}"><div class="l"><b>${st === "paid" ? "Received" : st === "overdue" ? "Late" : "Expected"}</b><small>${
+          st === "paid" ? `Landed ${fmtLong(e.received_date)}` : st === "overdue" ? `${plural(daysBetween(e.due_date, today), "day")} past due` : `Due ${fmtLong(e.due_date)}`
+        }</small></div><span class="switch"><input type="checkbox" id="e-recv" ${e.received_date ? "checked" : ""} aria-label="Received"><i></i></span></div>
+        <div class="field" id="e-recv-f" ${e.received_date ? "" : "hidden"}><label for="e-recvdate">Date received</label><input id="e-recvdate" type="date" value="${e.received_date || today}"></div>
+        <div class="field"><label for="e-notes">Notes <span>optional</span></label><textarea id="e-notes" rows="2">${esc(e.notes || "")}</textarea></div>
+        <div class="form-err" id="e-err"></div>
+        <button class="btn lime" type="submit">Save changes</button>
+        ${src ? `<button class="btn ghost" type="button" id="e-src">${ic("edit")} Change ${esc(src.name)}</button>` : ""}
+        <button class="btn danger" type="button" id="e-del">Delete this one</button>
+      </form>`;
+    openSheet(`${srcName(e)} · ${money(e.amount_pence)}`, html, (sh) => {
+      const recv = $("#e-recv", sh);
+      recv.addEventListener("change", () => ($("#e-recv-f", sh).hidden = !recv.checked));
+      const so = $("#e-src", sh);
+      if (so) so.onclick = () => incomeSourceSheet(src);
+      $("#e-del", sh).onclick = async () => {
+        if (!confirm(`Delete this ${money(e.amount_pence)} from ${srcName(e)}?`)) return;
+        try {
+          const r = await api(`/income/${e.id}`, { method: "DELETE" });
+          setData(r.data);
+          closeSheet();
+          rerender();
+          toast("Deleted");
+        } catch (x) {
+          fail(x);
+        }
+      };
+      $("#incForm", sh).onsubmit = async (ev) => {
+        ev.preventDefault();
+        const err = $("#e-err", sh);
+        const amt = parseMoney($("#e-amt", sh).value);
+        if (!amt) return (err.textContent = "Enter the amount.");
+        try {
+          const r = await api(`/income/${e.id}`, {
+            method: "PUT",
+            body: { amount_pence: amt, due_date: $("#e-due", sh).value, received_date: recv.checked ? $("#e-recvdate", sh).value || today : null, notes: $("#e-notes", sh).value },
+          });
+          setData(r.data);
+          closeSheet();
+          rerender();
+          toast("Saved");
+        } catch (x) {
+          err.textContent = x.message;
+        }
+      };
+    });
   }
 
   function skipSheet(p) {
@@ -2911,6 +3225,7 @@
         S.tab === "calendar" && S.calDay ? ` data-date="${S.calDay}"` : ""
       }><span class="ic">${ic("receipt")}</span><span><b>Add payment</b><small>A one-off or extra</small></span></button>
         <button class="action" data-action="add-client"><span class="ic">${ic("userplus")}</span><span><b>Add client</b><small>With their plan</small></span></button>
+        <button class="action" data-action="add-income"><span class="ic">${ic("coins")}</span><span><b>Add other income</b><small>Classes, online sales, affiliate, another job</small></span></button>
         ${S.tab === "clients" && S.clientId ? `<button class="action" data-change-plan="${S.clientId}"><span class="ic">${ic("swap")}</span><span><b>Change ${esc(firstName(client(S.clientId)?.name))}'s plan</b><small>Switch, break or finish</small></span></button>` : ""}
       </div>`
     );
@@ -3083,7 +3398,7 @@
         return;
       }
       const t = e.target.closest(
-        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix],[data-lost],[data-unskip]"
+        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix],[data-lost],[data-unskip],[data-open-inc],[data-inc-recv],[data-open-src]"
       );
       if (!t || t.disabled) return;
       const d = t.dataset;
@@ -3133,6 +3448,20 @@
         return rerender();
       }
       if (d.unskip) return unskip(Number(d.unskip));
+      if (d.incRecv) {
+        e.stopPropagation();
+        const r = t.getBoundingClientRect();
+        burst(r.left + r.width / 2, r.top + r.height / 2);
+        return incReceived(Number(d.incRecv), londonToday());
+      }
+      if (d.openInc) {
+        const x = incAll().find((y) => y.id === Number(d.openInc));
+        return x && incomeEntrySheet(x);
+      }
+      if (d.openSrc) {
+        const x = srcOf(Number(d.openSrc));
+        return x && incomeSourceSheet(x);
+      }
       if (d.action) {
         switch (d.action) {
           case "add":
@@ -3141,6 +3470,13 @@
             return paymentSheet(null, { due_date: d.date, client_id: d.client ? Number(d.client) : null });
           case "add-client":
             return clientSheet(null);
+          case "add-income":
+            return incomeSourceSheet(null);
+          case "all-rev":
+            S.allRev = !S.allRev;
+            setPref("allRev", S.allRev ? "1" : "0");
+            haptic();
+            return rerender();
           case "edit-client": {
             const c = client(Number(d.client));
             return c && clientSheet(c);
@@ -3252,7 +3588,7 @@
   );
 
   document.addEventListener("keydown", (e) => {
-    if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-open-pay][role=button]")) {
+    if ((e.key === "Enter" || e.key === " ") && e.target.matches("[data-open-pay][role=button],[data-open-inc][role=button]")) {
       e.preventDefault();
       e.target.click();
     }

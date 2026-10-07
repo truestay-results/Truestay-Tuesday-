@@ -25,6 +25,7 @@ import {
   ensureSchema, generate, cleanPlan, addFirstPlan, switchPlan, finishClient, editPlan, deletePlan, clientStatus, currentPlan, planLabel,
 } from "./pay-plans.js";
 import { vapidKeys, pushAll } from "./pay-push.js";
+import { ensureIncomeSchema, generateIncome, handleIncome } from "./pay-income.js";
 import { handleLogsApp } from "./logs.js";
 
 const LOCK_OPTIONS = [0, 1, 5, 15, 60, 240];
@@ -311,7 +312,9 @@ async function getData(env) {
   const db = env.PAY_DB;
   await ensureSchema(db);
   await generate(db);
-  const [c, p, pl, subs, sk] = await db.batch([
+  await ensureIncomeSchema(db);
+  await generateIncome(db);
+  const [c, p, pl, subs, sk, isrc, inc] = await db.batch([
     db.prepare("SELECT id, name, phone, tenure, package, programme_weeks, price_pence, method, notes, finished_on, created_at FROM pay_clients ORDER BY name COLLATE NOCASE"),
     db.prepare(
       "SELECT id, client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, chased_at, chase_count FROM pay_payments ORDER BY due_date, id"
@@ -319,6 +322,8 @@ async function getData(env) {
     db.prepare("SELECT * FROM pay_plans ORDER BY client_id, start_date, id"),
     db.prepare("SELECT COUNT(*) AS n FROM pay_push_subs"),
     db.prepare("SELECT * FROM pay_skips ORDER BY due_date, id"),
+    db.prepare("SELECT * FROM pay_income_sources ORDER BY name COLLATE NOCASE"),
+    db.prepare("SELECT * FROM pay_income ORDER BY due_date, id"),
   ]);
   return {
     today: londonToday(),
@@ -327,6 +332,8 @@ async function getData(env) {
     payments: p.results,
     plans: pl.results,
     skips: sk.results,
+    incomeSources: isrc.results,
+    income: inc.results,
     settings: await getSettings(db),
     pushDevices: subs.results[0].n,
   };
@@ -875,6 +882,13 @@ export async function handlePay(req, env, url, ctx) {
         await db.prepare("DELETE FROM pay_payments WHERE id = ?").bind(id).run();
         return json({ ok: true, data: await getData(env) });
       }
+    }
+
+    // ----- other income -----
+    if (path.startsWith("/income")) {
+      await ensureIncomeSchema(db);
+      const r = await handleIncome(db, path, method, () => readBody(req), async () => json({ ok: true, data: await getData(env) }));
+      if (r) return r;
     }
 
     // ----- skipped payments: undo puts the payment back exactly as it was -----
