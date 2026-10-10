@@ -61,7 +61,9 @@ Shan's own fat loss phase. Same sign in as Pay (email, password, Face ID). Add i
 - API: `src/cut.js`, routes `/api/pay/cut/*` behind Pay's sign in
 - Data: D1 database `truestay-cut` (binding `CUT_DB`)
   - `cut_days`: one row per day. Weight in kg, steps, calories, a workout tick, and "hit my steps" / "on my calories" ticks. A tick you set wins; otherwise typing the number sets it (steps at or over target, calories at or under)
-  - `cut_targets`: steps, calories and workouts a week, each in force from its `from_day`, so changing a target never rescores earlier weeks
+  - `cut_days` also holds protein (g) with its own tick (hit at or over target), and day tags (`tags`, comma list from `DAY_TAGS` in `src/cut.js`: bad sleep, salty food, drinks, takeaway, big carb day, late meal, hard leg day, travelling, ill, stressed) plus the short `note`. Columns added with ALTER TABLE on start-up if missing
+  - Scale jumps (Progress): a weigh-in 0.5 kg or more over the one before (within 3 days), explained by tags on that day or the day before. The chart marks tagged days and the readout says what was tagged
+  - `cut_targets`: steps, calories, protein and workouts a week, each in force from its `from_day`, so changing a target never rescores earlier weeks
   - `cut_meta`: phase start and end, and an optional rough goal weight
   - `cut_waist`: one waist measurement a week in cm, keyed by that week's Monday (the Weekly check-in card on Today). Shown in cm or inches (`waist_unit` in settings); stored in cm so switching never changes the numbers. Progress has its own waist chart (one measure per chart) and each week row shows the change
   - `cut_lifts` + `cut_sets`: the 3 or 4 main lifts (up to 6; removing one hides it and keeps its history) and one top set a week per lift (kg × reps, keyed by that week's Monday). Compared as an estimated one-rep max (Epley, reps capped at 12); bodyweight lifts (0 kg) compare on reps. Baseline is the best of the first two weeks. Holding is within 2.5% of it; Dropping is 2+ falls in a row and 5% or more under it, which shows a warning on Progress and on the lift's row on Today

@@ -301,6 +301,42 @@
     if (r.steps != null && t.steps) return r.steps >= t.steps;
     return null;
   }
+  function proteinHit(r, t) {
+    if (!r) return null;
+    if (r.protein_hit != null) return !!r.protein_hit;
+    if (r.protein != null && t.protein) return r.protein >= t.protein;
+    return null;
+  }
+  // ---------- day tags: the usual reasons a weigh-in jumps ----------
+  const TAGS = {
+    sleep: "Bad sleep",
+    salt: "Salty food",
+    drinks: "Drinks",
+    takeaway: "Takeaway or meal out",
+    carbs: "Big carb day",
+    late: "Late meal",
+    legs: "Hard leg day",
+    travel: "Travelling",
+    ill: "Ill",
+    stress: "Stressed",
+  };
+  const tagsOf = (day) => (rowOf(day)?.tags || "").split(",").filter((t) => TAGS[t]);
+  const tagWords = (ts) => ts.map((t) => TAGS[t].toLowerCase()).join(", ");
+  // a jump: this morning's weigh-in 0.5 kg or more over the last one (within 3 days). Tags from the day before and the day itself explain it
+  function jumps() {
+    const ws = weights();
+    const out = [];
+    for (let i = 1; i < ws.length; i++) {
+      const a = ws[i - 1];
+      const b = ws[i];
+      if (daysBetween(a.day, b.day) > 3) continue;
+      const up = b.weight - a.weight;
+      if (up < 0.5) continue;
+      const why = [...new Set([...tagsOf(addDays(b.day, -1)), ...tagsOf(b.day)])];
+      out.push({ day: b.day, up, why });
+    }
+    return out;
+  }
   function kcalHit(r, t) {
     if (!r) return null;
     if (r.kcal_hit != null) return !!r.kcal_hit;
@@ -355,6 +391,8 @@
     let workouts = 0;
     let stepDays = 0;
     let kcalDays = 0;
+    let protDays = 0;
+    const prots = [];
     const steps = [];
     const kcals = [];
     for (const d of past) {
@@ -363,11 +401,13 @@
       if (r?.workout === 1) workouts++;
       if (stepsHit(r, tt)) stepDays++;
       if (kcalHit(r, tt)) kcalDays++;
+      if (proteinHit(r, tt)) protDays++;
+      if (r?.protein != null) prots.push(r.protein);
       if (r?.steps != null) steps.push(r.steps);
       if (r?.kcal != null) kcals.push(r.kcal);
     }
     const wa = avgBetween(w, end);
-    return { w, end, days, past: past.length, t, workouts, stepDays, kcalDays, avgSteps: avg(steps), avgKcal: avg(kcals), avgW: wa.avg, nW: wa.n };
+    return { w, end, days, past: past.length, t, workouts, stepDays, kcalDays, avgSteps: avg(steps), avgKcal: avg(kcals), protDays, avgProt: avg(prots), avgW: wa.avg, nW: wa.n };
   }
   function phaseWeeks() {
     const s = setts();
@@ -444,12 +484,19 @@
     let calN = 0;
     let stepHit = 0;
     let stepN = 0;
+    let protHit = 0;
+    let protN = 0;
     for (let i = 14; i >= 1; i--) {
       const d = addDays(td, -i);
       const r = rowOf(d);
       const t = targetOn(d);
       const k = kcalHit(r, t);
       const st = stepsHit(r, t);
+      const pr = proteinHit(r, t);
+      if (pr != null) {
+        protN++;
+        if (pr) protHit++;
+      }
       if (k != null) {
         calN++;
         if (k) calHit++;
@@ -459,7 +506,7 @@
         if (st) stepHit++;
       }
     }
-    Object.assign(out, { calHit, calN, stepHit, stepN });
+    Object.assign(out, { calHit, calN, stepHit, stepN, protHit, protN });
     if (out.pct <= -0.25) return { ...out, state: "moving" };
     const changed = S.data.targets.filter((t) => t.from_day > addDays(td, -14) && t.from_day <= td).pop();
     if (changed) return { ...out, state: "recent", changed: changed.from_day };
@@ -495,7 +542,7 @@
     const t = baseTargetOn(today());
     return `<section class="stall rise" style="--i:2">
       <div class="st-h">${ic("flag")}<b>Weight's been flat for 2 weeks</b></div>
-      <p>${flat} You've been on your calories ${x.calHit} of ${x.calN} days${x.stepN ? ` and hit your steps ${x.stepHit} of ${x.stepN}` : ""}, so this is a real stall, not a slip. Pick one change:</p>
+      <p>${flat} You've been on your calories ${x.calHit} of ${x.calN} days${x.stepN ? ` and hit your steps ${x.stepHit} of ${x.stepN}` : ""}, so this is a real stall, not a slip.${x.protN >= 7 && x.protHit / x.protN < 0.7 ? ` Protein was only ${x.protHit} of ${x.protN} days though: get that up whatever you change, so the weight that comes off is fat.` : ""} Pick one change:</p>
       <div class="st-a">
         ${x.kcal ? `<button class="btn sm lime" data-stall-kcal="${x.kcal}">Drop to ${nfmt(x.kcal)} kcal</button>` : ""}
         ${x.steps ? `<button class="btn sm ${x.kcal ? "ghost" : "lime"}" data-stall-steps="${x.steps}">Go to ${nfmt(x.steps)} steps</button>` : ""}
@@ -519,7 +566,7 @@
     const td = today();
     const t = baseTargetOn(td);
     try {
-      const r = await api("/cut/targets", { method: "POST", body: { from_day: td, steps: t.steps, kcal: t.kcal, workouts: t.workouts, ...patch } });
+      const r = await api("/cut/targets", { method: "POST", body: { from_day: td, steps: t.steps, kcal: t.kcal, protein: t.protein, workouts: t.workouts, ...patch } });
       setData(r.state);
       rerender();
       toast(`${patch.kcal ? `Calories now ${nfmt(patch.kcal)}` : `Steps now ${nfmt(patch.steps)}`} from today. Give it 2 weeks.`);
@@ -648,7 +695,18 @@
           step: 100,
           ph: t.kcal ? nfmt(t.kcal) : "e.g. 2,200",
         })}
+        ${(() => {
+          const ph2 = proteinHit(r, t);
+          return tickCard("protein", t.protein ? `Hit ${nfmt(t.protein)} g protein` : "Hit my protein", ph2 === true, r?.protein != null ? `${nfmt(r.protein)} g logged${t.protein ? ` · ${r.protein >= t.protein ? `${nfmt(r.protein - t.protein)} over` : `${nfmt(t.protein - r.protein)} short`}` : ""}` : t.protein ? "Keeps the muscle while the fat comes off" : "Set a target in settings, or just tick it", {
+            field: "protein",
+            value: r?.protein,
+            label: "Grams",
+            step: 10,
+            ph: t.protein ? nfmt(t.protein) : "e.g. 180",
+          });
+        })()}
       </div>
+      ${notesCard(day)}
 
       ${weekCard(ws, day)}
 
@@ -681,6 +739,16 @@
         <span class="l"><b>${shots === 3 ? "Photos done" : `Photos · ${shots} of 3`}</b><small>${shots === 3 ? "Front, side and back are in." : "Front, side and back. Same spot, same light."}</small></span>
         <span class="chev">${ic("right")}</span>
       </button>
+    </section>`;
+  }
+  function notesCard(day) {
+    const on = new Set(tagsOf(day));
+    const note = rowOf(day)?.note || "";
+    return `<section class="card rise" style="--i:3">
+      <div class="ch"><h3>Day notes</h3><span>optional</span></div>
+      <p class="w-sub" style="margin-top:4px">Anything that'll show on the scale tomorrow? Tag it and the jump makes sense.</p>
+      <div class="opts tag-opts">${Object.entries(TAGS).map(([k, l]) => `<button type="button" class="opt${on.has(k) ? " on" : ""}" data-tag="${k}" aria-pressed="${on.has(k)}">${esc(l)}</button>`).join("")}</div>
+      <div class="tk-num" style="border-top:0;padding-top:0"><input id="dayNote" maxlength="500" autocomplete="off" enterkeyhint="done" placeholder="A short note, e.g. curry at Mum's" value="${esc(note)}" aria-label="Note for ${dayLabel(day)}"></div>
     </section>`;
   }
   function liftsCard(wk) {
@@ -754,6 +822,7 @@
       ["Train", (d) => rowOf(d)?.workout === 1],
       ["Steps", (d) => stepsHit(rowOf(d), targetOn(d)) === true],
       ["Cals", (d) => kcalHit(rowOf(d), targetOn(d)) === true],
+      ["Protein", (d) => proteinHit(rowOf(d), targetOn(d)) === true],
     ];
     return `<section class="card rise" style="--i:3">
       <div class="ch"><h3>This week</h3><span>${weekRange(ws.w)}</span></div>
@@ -818,7 +887,7 @@
       ${breaksCard()}
 
       <section class="chart-card rise" style="--i:1">
-        <div class="cc-head"><h3>Weight</h3><span class="legend-row" style="margin:0"><span><i class="k-dot"></i>Daily</span><span><i class="k-line"></i>7-day avg</span>${s.goal_kg ? `<span><i class="k-goal"></i>Goal</span>` : ""}</span></div>
+        <div class="cc-head"><h3>Weight</h3><span class="legend-row" style="margin:0"><span><i class="k-dot"></i>Daily</span><span><i class="k-line"></i>7-day avg</span>${s.goal_kg ? `<span><i class="k-goal"></i>Goal</span>` : ""}${S.data.days.some((r) => r.tags) ? `<span><i class="k-tag"></i>Tagged</span>` : ""}</span></div>
         <div class="seg" role="tablist">
           ${[["4w", "4 weeks"], ["3m", "3 months"], ["all", "Whole phase"]].map(([k, l]) => `<button class="${S.range === k ? "on" : ""}" data-range="${k}">${l}</button>`).join("")}
         </div>
@@ -826,6 +895,8 @@
         <div class="chart" id="chart"></div>
       </section>
       ${rt ? `<p class="hint" style="margin-top:8px">Rate is a straight line through your weigh-ins over the last 4 weeks, so one salty day doesn't swing it. Around 0.5 to 1% of bodyweight a week is the usual sweet spot for keeping muscle.</p>` : ""}
+
+      ${jumpsCard()}
 
       <section class="chart-card rise" style="--i:2">
         <div class="cc-head"><h3>Waist</h3><span class="legend-row" style="margin:0"><span>weekly, ${wUnit() === "in" ? "inches" : "cm"}</span></span></div>
@@ -856,6 +927,33 @@
                .join("")}</div>`
           : ""
       }`;
+  }
+  function jumpsCard() {
+    const js = jumps();
+    if (!js.length) return "";
+    const big = js.slice().sort((a, b) => b.up - a.up).slice(0, 5);
+    const explained = big.filter((j) => j.why.length);
+    const count = {};
+    for (const j of explained) for (const t of j.why) count[t] = (count[t] || 0) + 1;
+    const top = Object.entries(count).sort((a, b) => b[1] - a[1]).slice(0, 2).map(([t]) => TAGS[t].toLowerCase());
+    const after = `after ${top.join(" or ")}`;
+    const n = big.length;
+    const e = explained.length;
+    const head = !e
+      ? "None of your jumps are tagged yet. Tag days on Today and this starts to explain them."
+      : n === 1
+      ? `Your biggest jump came ${after}.`
+      : e === n
+      ? `All ${n} of your biggest jumps came ${after}.`
+      : `${e} of your ${n} biggest jumps came ${after}. ${n - e === 1 ? "The other had" : `The other ${n - e} had`} no tag.`;
+    return `<section class="card rise" style="--i:2">
+      <div class="ch"><h3>Scale jumps</h3><span>0.5 kg or more overnight</span></div>
+      <p class="w-sub" style="margin-top:6px">${esc(head)}</p>
+      <div class="jumps">${big
+        .map((j) => `<button class="mrow jrow" data-goday="${j.day}"><span>${dayLabel(j.day)}<small>${j.why.length ? esc(TAGS[j.why[0]] + (j.why.length > 1 ? ` + ${j.why.length - 1} more` : "")) : "No tag"}</small></span><span class="r"><b class="num">+${kg(j.up)} kg</b></span></button>`)
+        .join("")}</div>
+      <p class="hint" style="padding:0;margin-top:8px">Jumps like these are nearly always water and food weight. They drop off in a day or three.</p>
+    </section>`;
   }
   function breaksCard() {
     const td = today();
@@ -895,7 +993,22 @@
       <div class="ch"><h3>Strength</h3><span>top set each week</span></div>
       ${
         st.warn
-          ? `<div class="status-line warn" style="margin-top:10px">${ic("flag")}<span><b>${st.dropping.length ? `${st.dropping.map((x) => x.l.name).join(" and ")} ${st.dropping.length === 1 ? "has" : "have"} dropped ${st.dropping.length === 1 ? `${st.dropping[0].t.drops} weeks running` : "for a couple of weeks"}.` : "Your lifts are down more than 5% on your first weeks."}</b> In a cut that usually means the deficit's too big, protein's too low, or sleep's off. Worth a look before it costs muscle.</span></div>`
+          ? `<div class="status-line warn" style="margin-top:10px">${ic("flag")}<span><b>${st.dropping.length ? `${st.dropping.map((x) => x.l.name).join(" and ")} ${st.dropping.length === 1 ? "has" : "have"} dropped ${st.dropping.length === 1 ? `${st.dropping[0].t.drops} weeks running` : "for a couple of weeks"}.` : "Your lifts are down more than 5% on your first weeks."}</b> ${(() => {
+            const td = today();
+            let n = 0;
+            let hit = 0;
+            for (let i = 1; i <= 21; i++) {
+              const d = addDays(td, -i);
+              const h = proteinHit(rowOf(d), targetOn(d));
+              if (h != null) {
+                n++;
+                if (h) hit++;
+              }
+            }
+            return n >= 7 && hit / n < 0.7
+              ? `Protein's been hit on only ${hit} of ${n} days over the last 3 weeks, so start there. Then check the deficit isn't too big and sleep's OK.`
+              : "In a cut that usually means the deficit's too big, protein's too low, or sleep's off. Worth a look before it costs muscle.";
+          })()}</span></div>`
           : ""
       }
       ${st.line ? `<p class="w-sub" style="margin-top:8px">${st.line}</p>` : ""}
@@ -934,6 +1047,7 @@
         <div class="meter"><span>Trained<b class="num">${x.workouts}${x.t.workouts ? `/${x.t.workouts}` : ""}</b></span><i><em style="width:${pct(x.workouts, x.t.workouts || 7)}%"></em></i></div>
         <div class="meter"><span>Steps<b class="num">${x.stepDays}/${x.past}</b></span><i><em style="width:${pct(x.stepDays, x.past)}%"></em></i><small>${x.avgSteps != null ? `avg ${nfmt(x.avgSteps)}` : ""}</small></div>
         <div class="meter"><span>Cals<b class="num">${x.kcalDays}/${x.past}</b></span><i><em style="width:${pct(x.kcalDays, x.past)}%"></em></i><small>${x.avgKcal != null ? `avg ${nfmt(x.avgKcal)}` : ""}</small></div>
+        <div class="meter"><span>Protein<b class="num">${x.protDays}/${x.past}</b></span><i><em style="width:${pct(x.protDays, x.past)}%"></em></i><small>${x.avgProt != null ? `avg ${nfmt(x.avgProt)} g` : ""}</small></div>
       </div>
     </div>`;
   }
@@ -994,6 +1108,10 @@
         .join("")}
       ${goal ? `<line class="goal" x1="${padL}" x2="${W - padR}" y1="${y(goal)}" y2="${y(goal)}"/><text class="gt" x="${W - padR}" y="${y(goal) - 5}" text-anchor="end">Goal ${kg(goal)}</text>` : ""}
       ${pts.map((p) => `<circle class="dot" cx="${x(p.day).toFixed(1)}" cy="${y(p.weight).toFixed(1)}" r="${pts.length > 60 ? 3 : 4}"/>`).join("")}
+      ${pts
+        .filter((p) => tagsOf(addDays(p.day, -1)).length || tagsOf(p.day).length)
+        .map((p) => `<circle class="tagmark" cx="${x(p.day).toFixed(1)}" cy="${(H - padB - 5).toFixed(1)}" r="3"/>`)
+        .join("")}
       <path class="avg" d="${line}"/>
       <line class="cross" id="cx" y1="${padT}" y2="${H - padB}" x1="-10" x2="-10"/>
       <circle class="sel" id="cs" r="5" cx="-10" cy="-10"/>
@@ -1002,7 +1120,12 @@
       const p = pts[i];
       const a = avgPts[i];
       S.chartSel = p.day;
-      $("#readout").innerHTML = `<b>${dayLabel(p.day)}</b> · <b class="num">${kg(p.weight)} kg</b> · 7-day avg <span class="num">${kg(a.v)}</span>`;
+      const prev = pts[i - 1];
+      const jump = prev && daysBetween(prev.day, p.day) <= 3 ? p.weight - prev.weight : null;
+      const why = [...new Set([...tagsOf(addDays(p.day, -1)), ...tagsOf(p.day)])];
+      $("#readout").innerHTML = `<b>${dayLabel(p.day)}</b> · <b class="num">${kg(p.weight)} kg</b> · 7-day avg <span class="num">${kg(a.v)}</span>${
+        why.length ? `<br><span class="ro-why">${jump != null && jump >= 0.3 ? `Up ${kg(jump)} after ` : "Tagged: "}${esc(tagWords(why))}</span>` : ""
+      }`;
       const cx = x(p.day);
       $("#cx").setAttribute("x1", cx);
       $("#cx").setAttribute("x2", cx);
@@ -1113,6 +1236,16 @@
         const b = e.target.closest(".opt");
         if (b) b.classList.toggle("on");
       };
+    const dn = $("#dayNote");
+    if (dn) {
+      dn.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") dn.blur();
+      });
+      dn.addEventListener("change", async () => {
+        if ((rowOf(S.day)?.note || "") === dn.value.trim()) return;
+        if (await saveDay(S.day, { note: dn.value })) toast("Note saved");
+      });
+    }
     const wi = $("#waistIn");
     if (wi) {
       wi.addEventListener("keydown", (e) => {
@@ -1174,13 +1307,14 @@
     // typing the number sets the tick for you; you can still change the tick after
     if (field === "steps") patch.steps_hit = n == null ? null : t.steps ? (n >= t.steps ? 1 : 0) : r?.steps_hit ?? null;
     if (field === "kcal") patch.kcal_hit = n == null ? null : t.kcal ? (n <= t.kcal ? 1 : 0) : r?.kcal_hit ?? null;
+    if (field === "protein") patch.protein_hit = n == null ? null : t.protein ? (n >= t.protein ? 1 : 0) : r?.protein_hit ?? null;
     if (await saveDay(day, patch)) rerender();
   }
   let nTimer;
   function stepNum(field, by) {
     const inp = $(`#n-${field}`);
     const t = targetOn(S.day);
-    const cur = numFrom(inp.value) ?? (field === "steps" ? t.steps : t.kcal) ?? 0;
+    const cur = numFrom(inp.value) ?? (field === "steps" ? t.steps : field === "protein" ? t.protein : t.kcal) ?? 0;
     const next = Math.max(0, Math.round((cur + by) / Math.abs(by)) * Math.abs(by));
     inp.value = nfmt(next);
     haptic();
@@ -1191,8 +1325,8 @@
     const day = S.day;
     const r = rowOf(day);
     const t = targetOn(day);
-    const cur = key === "workout" ? r?.workout === 1 : key === "steps" ? stepsHit(r, t) === true : kcalHit(r, t) === true;
-    const field = key === "workout" ? "workout" : key === "steps" ? "steps_hit" : "kcal_hit";
+    const cur = key === "workout" ? r?.workout === 1 : key === "steps" ? stepsHit(r, t) === true : key === "protein" ? proteinHit(r, t) === true : kcalHit(r, t) === true;
+    const field = key === "workout" ? "workout" : key === "steps" ? "steps_hit" : key === "protein" ? "protein_hit" : "kcal_hit";
     haptic();
     if (await saveDay(day, { [field]: cur ? 0 : 1 })) {
       rerender();
@@ -1834,11 +1968,13 @@
           </div>
           <div class="field"><span class="lab">How long</span><div class="opts" data-name="len">${LENGTHS.map((n) => `<button type="button" class="opt${n === 24 ? " on" : ""}" data-val="${n}">${n} wks</button>`).join("")}</div></div>
           <p class="hint" id="s-end-l"></p>
-          <div class="three">
+          <div class="two">
             <div class="field"><label for="s-steps">Steps a day</label><input id="s-steps" inputmode="numeric" value="10,000"></div>
             <div class="field"><label for="s-kcal">Calories</label><input id="s-kcal" inputmode="numeric" placeholder="2,200"></div>
-            <div class="field"><label for="s-wo">Workouts/wk</label><input id="s-wo" inputmode="numeric" value="4"></div>
+            <div class="field"><label for="s-prot">Protein, g</label><input id="s-prot" inputmode="numeric" placeholder="e.g. 180"></div>
+            <div class="field"><label for="s-wo">Workouts a week</label><input id="s-wo" inputmode="numeric" value="4"></div>
           </div>
+          <p class="hint">Protein: about 2 g per kg of bodyweight is a solid target in a cut.</p>
           <div class="field"><label for="s-waist">Waist today <span>optional</span></label>
             <div class="tk-num" style="border-top:0;margin-top:0;padding-top:0">
               <input id="s-waist" inputmode="decimal" autocomplete="off" placeholder="Tape at your belly button">
@@ -1887,7 +2023,7 @@
             end_date: endFor(),
             goal_kg: numFrom($("#s-goal").value),
             waist_unit: unit,
-            targets: { steps: numFrom($("#s-steps").value), kcal: numFrom($("#s-kcal").value), workouts: numFrom($("#s-wo").value) },
+            targets: { steps: numFrom($("#s-steps").value), kcal: numFrom($("#s-kcal").value), protein: numFrom($("#s-prot").value), workouts: numFrom($("#s-wo").value) },
           },
         });
         setData(r.state);
@@ -1918,10 +2054,11 @@
     openSheet("Settings", `
       <div class="group-title" style="margin-top:4px">Targets from today</div>
       <form class="form" id="tForm" novalidate>
-        <div class="three">
+        <div class="two">
           <div class="field"><label for="t-steps">Steps a day</label><input id="t-steps" inputmode="numeric" value="${t.steps != null ? nfmt(t.steps) : ""}"></div>
           <div class="field"><label for="t-kcal">Calories</label><input id="t-kcal" inputmode="numeric" value="${t.kcal != null ? nfmt(t.kcal) : ""}"></div>
-          <div class="field"><label for="t-wo">Workouts/wk</label><input id="t-wo" inputmode="numeric" value="${t.workouts ?? ""}"></div>
+          <div class="field"><label for="t-prot">Protein, g</label><input id="t-prot" inputmode="numeric" value="${t.protein != null ? nfmt(t.protein) : ""}" placeholder="${lastWeight() ? `about ${Math.round((lastWeight().weight * 2) / 5) * 5}` : "e.g. 180"}"></div>
+          <div class="field"><label for="t-wo">Workouts a week</label><input id="t-wo" inputmode="numeric" value="${t.workouts ?? ""}"></div>
         </div>
         <div class="form-err" id="t-err"></div>
         <button class="btn lime" type="submit">Save targets</button>
@@ -1932,7 +2069,7 @@
               .slice()
               .reverse()
               .map(
-                (x, i, arr) => `<div class="mrow"><span>From ${dayLabel(x.from_day)}<small>${[x.steps != null ? `${nfmt(x.steps)} steps` : null, x.kcal != null ? `${nfmt(x.kcal)} kcal` : null, x.workouts != null ? `${x.workouts} workouts` : null].filter(Boolean).join(" · ") || "No targets"}</small></span>${i < arr.length - 1 ? `<button class="linkish" data-deltarget="${x.id}">Remove</button>` : `<span class="r"><small>start</small></span>`}</div>`
+                (x, i, arr) => `<div class="mrow"><span>From ${dayLabel(x.from_day)}<small>${[x.steps != null ? `${nfmt(x.steps)} steps` : null, x.kcal != null ? `${nfmt(x.kcal)} kcal` : null, x.protein != null ? `${nfmt(x.protein)} g protein` : null, x.workouts != null ? `${x.workouts} workouts` : null].filter(Boolean).join(" · ") || "No targets"}</small></span>${i < arr.length - 1 ? `<button class="linkish" data-deltarget="${x.id}">Remove</button>` : `<span class="r"><small>start</small></span>`}</div>`
               )
               .join("")}</div>`
           : ""
@@ -1966,7 +2103,7 @@
         try {
           const r = await api("/cut/targets", {
             method: "POST",
-            body: { from_day: td, steps: numFrom($("#t-steps", sh).value), kcal: numFrom($("#t-kcal", sh).value), workouts: numFrom($("#t-wo", sh).value) },
+            body: { from_day: td, steps: numFrom($("#t-steps", sh).value), kcal: numFrom($("#t-kcal", sh).value), protein: numFrom($("#t-prot", sh).value), workouts: numFrom($("#t-wo", sh).value) },
           });
           setData(r.state);
           closeSheet();
@@ -2097,7 +2234,7 @@
   document.addEventListener("click", async (e) => {
     if (e.target.closest("[data-close]")) return closeSheet();
     const el = e.target.closest(
-      "[data-tab],[data-day],[data-goday],[data-delbreak],[data-stall-kcal],[data-stall-steps],[data-tick],[data-wstep],[data-waiststep],[data-wunit],[data-nstep],[data-range],[data-pose],[data-addphoto],[data-photo],[data-theme-set],[data-deltarget],[data-action]"
+      "[data-tab],[data-day],[data-goday],[data-tag],[data-delbreak],[data-stall-kcal],[data-stall-steps],[data-tick],[data-wstep],[data-waiststep],[data-wunit],[data-nstep],[data-range],[data-pose],[data-addphoto],[data-photo],[data-theme-set],[data-deltarget],[data-action]"
     );
     if (!el || el.disabled) return;
     const d = el.dataset;
@@ -2114,10 +2251,25 @@
     }
     if (d.goday) {
       S.day = d.goday;
+      if (S.tab !== "today") {
+        S.tab = "today";
+        render("fade");
+        return window.scrollTo(0, 0);
+      }
       rerender();
       return window.scrollTo({ top: 0, behavior: "smooth" });
     }
     if (d.tick) return toggleTick(d.tick);
+    if (d.tag) {
+      const cur = new Set(tagsOf(S.day));
+      if (cur.has(d.tag)) cur.delete(d.tag);
+      else cur.add(d.tag);
+      el.classList.toggle("on", cur.has(d.tag));
+      el.setAttribute("aria-pressed", cur.has(d.tag));
+      haptic();
+      if (await saveDay(S.day, { tags: [...cur] })) rerender();
+      return;
+    }
     if (d.wstep) return stepWeight(Number(d.wstep));
     if (d.waiststep) return stepWaist(Number(d.waiststep));
     if (d.wunit) {

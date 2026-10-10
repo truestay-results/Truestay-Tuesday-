@@ -677,3 +677,14 @@ body.cam-open { overflow: hidden; }
 .switch input:checked + i { background: var(--lime-deep); }
 .switch input:checked + i::after { transform: translateX(20px); }
 .switch input:focus-visible + i { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* day notes, scale jumps, protein */
+.tag-opts { margin-top: 10px; }
+.tag-opts .opt { flex: 0 1 auto; font-size: 14px; padding: 9px 12px; }
+.chart .tagmark { fill: #F5BD55; stroke: var(--card); stroke-width: 1.5; }
+.legend-row .k-tag { width: 7px; height: 7px; border-radius: 50%; background: #F5BD55; }
+.ro-why { color: #F5BD55; font-size: 13px; }
+.jumps { margin-top: 4px; }
+.jrow { width: 100%; text-align: left; min-height: 52px; }
+.wk { grid-template-columns: 50px repeat(7, minmax(0, 1fr)); }
+.meters { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 14px; }

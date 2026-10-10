@@ -1,7 +1,7 @@
 // TrueStay Cut service worker: keeps the app shell available for a fast, app-like start.
 // Network first with a cached copy if offline. Never touches /api.
-const CACHE = "ts-cut-v6";
-const SHELL = ["./", "app.css?v=6", "app.js?v=6", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png"];
+const CACHE = "ts-cut-v7";
+const SHELL = ["./", "app.css?v=7", "app.js?v=7", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));

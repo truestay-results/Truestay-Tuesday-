@@ -3,8 +3,9 @@
 //
 // Same sign-in as TrueStay Pay: the app's routes are /api/pay/cut/* (see pay.js).
 // Data lives in its own D1 database (binding CUT_DB):
-//   cut_days     one row per day: weight (kg), steps, calories, workout tick, and the two "hit it" ticks
-//   cut_targets  steps / calories / workouts-a-week, each row in force from its from_day until the next one,
+//   cut_days     one row per day: weight (kg), steps, calories, protein (g), workout tick, the "hit it" ticks,
+//                and day tags (bad sleep, salty food, drinks...) with a short note, to explain weigh-in jumps
+//   cut_targets  steps / calories / protein / workouts-a-week, each row in force from its from_day until the next one,
 //                so changing a target never rewrites how earlier weeks scored
 //   cut_meta     settings: phase start, phase end, a loose goal weight
 //   cut_waist    one waist measurement a week (cm), keyed by the Monday of that week
@@ -67,8 +68,19 @@ async function ensureSchema(db) {
       PRIMARY KEY (week, lift_id)
     )`),
   ]);
+  // columns added after the first version
+  const cols = async (t) => new Set((await db.prepare(`PRAGMA table_info(${t})`).all()).results.map((r) => r.name));
+  const dc = await cols("cut_days");
+  const tc = await cols("cut_targets");
+  const add = [];
+  if (!dc.has("protein")) add.push(db.prepare("ALTER TABLE cut_days ADD COLUMN protein INTEGER"));
+  if (!dc.has("protein_hit")) add.push(db.prepare("ALTER TABLE cut_days ADD COLUMN protein_hit INTEGER"));
+  if (!dc.has("tags")) add.push(db.prepare("ALTER TABLE cut_days ADD COLUMN tags TEXT NOT NULL DEFAULT ''"));
+  if (!tc.has("protein")) add.push(db.prepare("ALTER TABLE cut_targets ADD COLUMN protein INTEGER"));
+  if (add.length) await db.batch(add);
   ready = true;
 }
+export const DAY_TAGS = ["sleep", "salt", "drinks", "takeaway", "carbs", "late", "legs", "travel", "ill", "stress"];
 
 async function getSettings(db) {
   const r = await db.prepare("SELECT value FROM cut_meta WHERE key = 'settings'").first();
@@ -82,8 +94,8 @@ async function getSettings(db) {
 async function getState(db) {
   const [s, d, t, p, w, l, st, br] = await db.batch([
     db.prepare("SELECT value FROM cut_meta WHERE key = 'settings'"),
-    db.prepare("SELECT day, weight, steps, steps_hit, kcal, kcal_hit, workout, note FROM cut_days ORDER BY day"),
-    db.prepare("SELECT id, from_day, steps, kcal, workouts FROM cut_targets ORDER BY from_day"),
+    db.prepare("SELECT day, weight, steps, steps_hit, kcal, kcal_hit, protein, protein_hit, workout, tags, note FROM cut_days ORDER BY day"),
+    db.prepare("SELECT id, from_day, steps, kcal, protein, workouts FROM cut_targets ORDER BY from_day"),
     db.prepare("SELECT id, week, pose, day, bytes, w, h, created_at FROM cut_photos WHERE ready = 1 ORDER BY week, pose"),
     db.prepare("SELECT week, day, cm FROM cut_waist ORDER BY week"),
     db.prepare("SELECT id, name, sort, active FROM cut_lifts ORDER BY sort, id"),
@@ -112,6 +124,7 @@ function cleanTargets(b) {
     steps: numIn(b.steps ?? null, 0, 60000, "The steps target"),
     kcal: numIn(b.kcal ?? null, 0, 8000, "The calorie target"),
     workouts: numIn(b.workouts ?? null, 0, 14, "The workouts target"),
+    protein: numIn(b.protein ?? null, 0, 500, "The protein target"),
   };
 }
 
@@ -157,7 +170,7 @@ export async function handleCut(req, env, url, path) {
       const first = await db.prepare("SELECT id FROM cut_targets ORDER BY from_day LIMIT 1").first();
       if (!first)
         stmts.push(
-          db.prepare("INSERT INTO cut_targets (from_day, steps, kcal, workouts, created_at) VALUES (?, ?, ?, ?, ?)").bind(start, t.steps, t.kcal, t.workouts, now)
+          db.prepare("INSERT INTO cut_targets (from_day, steps, kcal, protein, workouts, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(start, t.steps, t.kcal, t.protein, t.workouts, now)
         );
     }
     // the earliest targets always cover the start of the phase
@@ -183,19 +196,23 @@ export async function handleCut(req, env, url, path) {
       steps_hit: has(b, "steps_hit") ? tick(b.steps_hit) : old.steps_hit ?? null,
       kcal: has(b, "kcal") ? numIn(b.kcal, 0, 15000, "That calorie number") : old.kcal ?? null,
       kcal_hit: has(b, "kcal_hit") ? tick(b.kcal_hit) : old.kcal_hit ?? null,
+      protein: has(b, "protein") ? numIn(b.protein, 0, 1000, "That protein number") : old.protein ?? null,
+      protein_hit: has(b, "protein_hit") ? tick(b.protein_hit) : old.protein_hit ?? null,
       workout: has(b, "workout") ? tick(b.workout) : old.workout ?? null,
+      tags: has(b, "tags") ? [...new Set((Array.isArray(b.tags) ? b.tags : []).filter((x) => DAY_TAGS.includes(x)))].join(",") : old.tags ?? "",
       note: has(b, "note") ? String(b.note ?? "").trim().slice(0, 500) : old.note ?? "",
     };
-    const empty = ["weight", "steps", "steps_hit", "kcal", "kcal_hit", "workout"].every((k) => row[k] == null) && !row.note;
+    const empty = ["weight", "steps", "steps_hit", "kcal", "kcal_hit", "protein", "protein_hit", "workout"].every((k) => row[k] == null) && !row.note && !row.tags;
     if (empty) await db.prepare("DELETE FROM cut_days WHERE day = ?").bind(day).run();
     else
       await db
         .prepare(
-          `INSERT INTO cut_days (day, weight, steps, steps_hit, kcal, kcal_hit, workout, note, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO cut_days (day, weight, steps, steps_hit, kcal, kcal_hit, protein, protein_hit, workout, tags, note, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(day) DO UPDATE SET weight = excluded.weight, steps = excluded.steps, steps_hit = excluded.steps_hit, kcal = excluded.kcal,
-             kcal_hit = excluded.kcal_hit, workout = excluded.workout, note = excluded.note, updated_at = excluded.updated_at`
+             kcal_hit = excluded.kcal_hit, protein = excluded.protein, protein_hit = excluded.protein_hit, workout = excluded.workout,
+             tags = excluded.tags, note = excluded.note, updated_at = excluded.updated_at`
         )
-        .bind(day, row.weight, row.steps, row.steps_hit, row.kcal, row.kcal_hit, row.workout, row.note, now)
+        .bind(day, row.weight, row.steps, row.steps_hit, row.kcal, row.kcal_hit, row.protein, row.protein_hit, row.workout, row.tags, row.note, now)
         .run();
     return state();
   }
@@ -211,10 +228,10 @@ export async function handleCut(req, env, url, path) {
     const day = first && from < first.from_day ? first.from_day : settings && from < settings.start_date ? settings.start_date : from;
     await db
       .prepare(
-        `INSERT INTO cut_targets (from_day, steps, kcal, workouts, created_at) VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(from_day) DO UPDATE SET steps = excluded.steps, kcal = excluded.kcal, workouts = excluded.workouts`
+        `INSERT INTO cut_targets (from_day, steps, kcal, protein, workouts, created_at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(from_day) DO UPDATE SET steps = excluded.steps, kcal = excluded.kcal, protein = excluded.protein, workouts = excluded.workouts`
       )
-      .bind(day, t.steps, t.kcal, t.workouts, now)
+      .bind(day, t.steps, t.kcal, t.protein, t.workouts, now)
       .run();
     return state();
   }
