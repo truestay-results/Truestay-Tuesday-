@@ -557,3 +557,22 @@ details.manual .steps { padding: 4px 14px 16px; }
 .three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .field input { min-width: 0; }
 .three .field > label { font-size: 12px; }
+
+/* weekly check-in: waist + photos */
+.w-unit { font-size: 14px; color: var(--muted); flex: 0 0 auto; }
+.w-sub { font-size: 13px; color: var(--muted); margin: 8px 2px 0; line-height: 1.4; }
+.ci-photos { display: flex; align-items: center; gap: 12px; width: 100%; text-align: left; margin-top: 12px; padding: 12px 0 0; border-top: 1px solid var(--line); min-height: 56px; }
+.ci-photos .ico { width: 40px; height: 40px; border-radius: 13px; background: var(--card); color: var(--lime); display: grid; place-items: center; flex: 0 0 auto; }
+.ci-photos .ico svg { width: 20px; height: 20px; }
+.ci-photos .l { flex: 1; min-width: 0; }
+.ci-photos .l b { display: block; font-weight: 600; }
+.ci-photos .l small { display: block; font-size: 13px; color: var(--muted); }
+.ci-photos .chev { color: var(--muted); }
+.ci-photos .chev svg { width: 16px; height: 16px; }
+.chart .wdot { fill: var(--lime); stroke: var(--card); stroke-width: 2; }
+.tk-num .opts .opt { min-height: 44px; padding: 8px 14px; flex: 0 0 auto; }
+.wwaist { display: block; font-size: 13px; color: var(--muted); margin-top: 4px; }
+.wwaist b { color: var(--ink); font-weight: 600; }
+.wwaist .chg { font-size: 13px; }
+.wrow .wt .wwaist b { font-size: 13px; }
+.chg { white-space: nowrap; }

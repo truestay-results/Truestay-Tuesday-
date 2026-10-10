@@ -362,6 +362,15 @@
   const photoOf = (week, pose) => S.data.photos.find((p) => p.week === week && p.pose === pose) || null;
   const photoUrl = (p) => `${API}/cut/photos/${p.id}`;
 
+  // ---------- waist: one a week, stored in cm, shown in cm or inches ----------
+  const wUnit = () => (setts()?.waist_unit === "in" ? "in" : "cm");
+  const toUnit = (cm) => (cm == null ? null : wUnit() === "in" ? cm / 2.54 : cm);
+  const fromUnit = (v) => (v == null ? null : wUnit() === "in" ? v * 2.54 : v);
+  const waistTxt = (cm) => (cm == null ? "—" : (Math.round(toUnit(cm) * 10) / 10).toFixed(1));
+  const waistOf = (week) => (S.data.waist || []).find((x) => x.week === week) || null;
+  const waistBefore = (week) => (S.data.waist || []).filter((x) => x.week < week).pop() || null;
+  const waistChg = (cmDiff) => chg(toUnit(cmDiff), wUnit());
+
   // ---------- saving a day ----------
   async function saveDay(day, patch) {
     try {
@@ -461,11 +470,35 @@
 
       ${weekCard(ws, day)}
 
-      <button class="card setup-card" data-tab="photos" style="width:100%;text-align:left">
-        <div class="ico">${ic("camera")}</div>
-        <div><div class="t">${shots === 3 ? "This week's photos are in" : `This week's photos · ${shots} of 3`}</div><div class="d">${shots === 3 ? "Front, side and back done. Next set from Monday." : "Front, side and back, once a week. Same spot, same light."}</div></div>
+      ${checkinCard(wk, shots)}`;
+  }
+  function checkinCard(wk, shots) {
+    const w = waistOf(wk);
+    const prev = waistBefore(wk);
+    const first = (S.data.waist || [])[0];
+    const sub = w
+      ? prev
+        ? `${waistChg(w.cm - prev.cm)} on last time${first && first.week !== wk && first.week !== prev.week ? ` · ${waistChg(w.cm - first.cm)} since you started` : ""}`
+        : "Your first one. Next week's goes against it."
+      : prev
+      ? `Last time ${waistTxt(prev.cm)} ${wUnit()} on ${shortDay(prev.day)}`
+      : "Tape level at your belly button, breathe out normally, don't suck in.";
+    return `<section class="card rise" style="--i:4">
+      <div class="ch"><h3>Weekly check-in</h3><span>${weekRange(wk)}</span></div>
+      <div class="tk-num" style="border-top:0;padding-top:0;margin-top:12px">
+        <label for="waistIn">Waist</label>
+        <button class="mini-step" data-waiststep="-0.5" aria-label="Waist down 0.5 ${wUnit()}">${ic("minus")}</button>
+        <input id="waistIn" inputmode="decimal" autocomplete="off" enterkeyhint="done" value="${w ? waistTxt(w.cm) : ""}" placeholder="${prev ? waistTxt(prev.cm) : wUnit() === "in" ? "e.g. 36.0" : "e.g. 92.0"}" aria-label="Waist in ${wUnit() === "in" ? "inches" : "cm"}">
+        <span class="w-unit">${wUnit()}</span>
+        <button class="mini-step" data-waiststep="0.5" aria-label="Waist up 0.5 ${wUnit()}">${ic("plus")}</button>
+      </div>
+      <p class="w-sub">${sub}</p>
+      <button class="ci-photos" data-tab="photos">
+        <span class="ico">${ic("camera")}</span>
+        <span class="l"><b>${shots === 3 ? "Photos done" : `Photos · ${shots} of 3`}</b><small>${shots === 3 ? "Front, side and back are in." : "Front, side and back. Same spot, same light."}</small></span>
         <span class="chev">${ic("right")}</span>
-      </button>`;
+      </button>
+    </section>`;
   }
   function tickCard(key, title, on, sub, num) {
     return `<div class="tk rise" style="--i:2">
@@ -544,8 +577,13 @@
             : "Weigh in each morning and this fills in."
         }</div>
         <div class="stats">
-          <div>Rate<b class="num">${rt ? `${kgSigned(rt.perWeek)}` : "—"}<small style="display:inline;font-size:12px"> ${rt ? "kg/wk" : ""}</small></b><small>${rt ? `${Math.abs(rt.pct).toFixed(1)}% of you a week` : "after 2 weeks"}</small></div>
-          <div>Weigh-ins<b class="num">${ws.length}</b><small>${ph && ph.week ? `in ${plural(ph.week, "week")}` : ""}</small></div>
+          <div>Rate<b class="num">${rt ? `${kgSigned(rt.perWeek)}` : "—"}</b><small>${rt ? `kg a week · ${Math.abs(rt.pct).toFixed(1)}% of you` : "after 2 weeks"}</small></div>
+          ${(() => {
+            const wl = S.data.waist || [];
+            const lastW = wl[wl.length - 1];
+            const d = wl.length > 1 ? lastW.cm - wl[0].cm : null;
+            return `<div>Waist<b class="num">${lastW ? waistTxt(lastW.cm) : "—"}</b><small>${d != null ? `${wUnit()} · ${d <= 0 ? "down" : "up"} ${Math.abs(Math.round(toUnit(d) * 10) / 10).toFixed(1)} since ${shortDay(wl[0].day)}` : lastW ? `${wUnit()} · first one in` : "weekly, on Today"}</small></div>`;
+          })()}
           <div>${s.goal_kg ? "To rough goal" : "Phase"}<b class="num">${s.goal_kg ? (toGoal != null ? (toGoal > 0 ? kg(toGoal) : "Hit") : "—") : ph ? `${ph.week}/${ph.total}` : "—"}</b><small>${s.goal_kg ? `goal ${kg(s.goal_kg)} kg` : "weeks"}</small></div>
         </div>
       </section>
@@ -559,6 +597,13 @@
         <div class="chart" id="chart"></div>
       </section>
       ${rt ? `<p class="hint" style="margin-top:8px">Rate is a straight line through your weigh-ins over the last 4 weeks, so one salty day doesn't swing it. Around 0.5 to 1% of bodyweight a week is the usual sweet spot for keeping muscle.</p>` : ""}
+
+      <section class="chart-card rise" style="--i:2">
+        <div class="cc-head"><h3>Waist</h3><span class="legend-row" style="margin:0"><span>weekly, ${wUnit() === "in" ? "inches" : "cm"}</span></span></div>
+        <p class="readout" id="wReadout" aria-live="polite"></p>
+        <div class="chart" id="wChart"></div>
+      </section>
+      ${(S.data.waist || []).length > 1 ? `<p class="hint" style="margin-top:8px">If the scale stalls but your waist keeps coming down, it's working. That's often muscle holding on while fat comes off.</p>` : ""}
 
       <div class="section-head"><h2>Weeks</h2><span>${plural(weeks.length, "week")}</span></div>
       ${weeks
@@ -588,7 +633,12 @@
     const change = x.avgW != null && prev?.avgW != null ? x.avgW - prev.avgW : null;
     return `<div class="wrow">
       <div class="wt">
-        <div><b>${wn && wn > 0 ? `Week ${wn}` : "Before the phase"}${x.past < 7 ? " · so far" : ""}</b><small>${weekRange(x.w)}</small></div>
+        <div><b>${wn && wn > 0 ? `Week ${wn}` : "Before the phase"}${x.past < 7 ? " · so far" : ""}</b><small>${weekRange(x.w)}</small>${(() => {
+          const w = waistOf(x.w);
+          if (!w) return "";
+          const pv = waistBefore(x.w);
+          return `<span class="wwaist">Waist <b class="num">${waistTxt(w.cm)} ${wUnit()}</b>${pv ? ` · ${waistChg(w.cm - pv.cm)}` : ""}</span>`;
+        })()}</div>
         <div class="r"><b class="num">${x.avgW != null ? kg(x.avgW) : "—"}</b><small>${x.avgW != null ? (change != null ? chg(change) : `avg of ${plural(x.nW, "weigh-in")}`) : "no weigh-ins"}</small></div>
       </div>
       <div class="meters">
@@ -700,7 +750,7 @@
       const a = w ? avgBetween(w, addDays(w, 6)).avg : null;
       return `<figure>
         ${p ? `<button class="ph" data-photo="${p.id}" aria-label="Open ${POSE[S.pose]} photo, ${wName(w)}"><img src="${photoUrl(p)}" alt="${POSE[S.pose]}, ${wName(w)}" loading="lazy"></button>` : `<div class="ph">No ${POSE[S.pose].toLowerCase()} photo yet</div>`}
-        <figcaption>${w ? `<b>${wName(w)}</b>${p ? shortDay(p.day) : weekRange(w)}${a != null ? ` · avg ${kg(a)} kg` : ""}` : ""}</figcaption>
+        <figcaption>${w ? `<b>${wName(w)}</b>${p ? shortDay(p.day) : weekRange(w)}${a != null ? ` · avg ${kg(a)} kg` : ""}${waistOf(w) ? ` · waist ${waistTxt(waistOf(w).cm)} ${wUnit()}` : ""}` : ""}</figcaption>
       </figure>`;
     };
     const opt = (sel) => withPose.map((w) => `<option value="${w}" ${w === sel ? "selected" : ""}>${wName(w)}</option>`).join("");
@@ -744,7 +794,17 @@
 
   // ---------- after each render ----------
   function after() {
-    if (S.tab === "progress") drawChart();
+    if (S.tab === "progress") {
+      drawChart();
+      drawWaist();
+    }
+    const wi = $("#waistIn");
+    if (wi) {
+      wi.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") wi.blur();
+      });
+      wi.addEventListener("change", () => saveWaist(wi.value));
+    }
     const w = $("#wIn");
     if (w) {
       w.addEventListener("keydown", (e) => {
@@ -826,6 +886,105 @@
         if (ws.t.workouts && ws.workouts === ws.t.workouts) toast(`That's ${ws.workouts} of ${ws.t.workouts} this week. Target hit.`);
       }
     }
+  }
+
+  // ---------- waist ----------
+  let waistTimer;
+  async function saveWaist(v) {
+    clearTimeout(waistTimer);
+    const n = numFrom(v);
+    const cm = n == null ? null : Math.round(fromUnit(n) * 10) / 10;
+    if (cm != null && (cm < 40 || cm > 200)) return toast(`That waist doesn't look right. It's in ${wUnit() === "in" ? "inches" : "cm"}.`);
+    const wk = weekOf(S.day);
+    const old = waistOf(wk);
+    if ((old?.cm ?? null) === cm) return;
+    try {
+      const r = await api(`/cut/waist/${S.day}`, { method: "PUT", body: { cm } });
+      setData(r.state);
+      rerender();
+      if (cm != null) toast(old ? "Waist updated" : "Waist saved for this week");
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function stepWaist(by) {
+    const inp = $("#waistIn");
+    const cur = numFrom(inp.value) ?? numFrom(inp.placeholder.replace(/^e\.g\. /, "")) ?? (wUnit() === "in" ? 36 : 92);
+    inp.value = (Math.round((cur + by) * 2) / 2).toFixed(1);
+    haptic();
+    clearTimeout(waistTimer);
+    waistTimer = setTimeout(() => saveWaist(inp.value), 900);
+  }
+  // waist chart: one point a week, joined by a line. One measure, one axis.
+  function drawWaist() {
+    const el = $("#wChart");
+    if (!el) return;
+    const pts = (S.data.waist || []).map((x) => ({ day: x.day, week: x.week, v: toUnit(x.cm) }));
+    const ro = $("#wReadout");
+    if (pts.length < 2) {
+      el.innerHTML = `<div class="chart-empty">${pts.length ? "One measurement so far. The line starts with next week's." : "Add your waist in the weekly check-in on Today."}</div>`;
+      ro.innerHTML = "";
+      return;
+    }
+    const W = el.clientWidth || 320;
+    const H = 170;
+    const padL = 36;
+    const padR = 8;
+    const padT = 10;
+    const padB = 24;
+    const start = pts[0].day;
+    const end = pts[pts.length - 1].day;
+    const span = Math.max(1, daysBetween(start, end));
+    let lo = Math.min(...pts.map((p) => p.v));
+    let hi = Math.max(...pts.map((p) => p.v));
+    const stepK = hi - lo > 8 ? 2 : hi - lo > 3 ? 1 : 0.5;
+    lo = Math.floor((lo - 0.2) / stepK) * stepK;
+    hi = Math.ceil((hi + 0.2) / stepK) * stepK;
+    const x = (d) => padL + (daysBetween(start, d) / span) * (W - padL - padR);
+    const y = (v) => padT + (1 - (v - lo) / (hi - lo)) * (H - padT - padB);
+    const ticks = [];
+    const nT = Math.round((hi - lo) / stepK);
+    const every = Math.ceil(nT / 3);
+    for (let i = 0; i <= nT; i += every) ticks.push(lo + i * stepK);
+    const xl = pts.length > 2 ? [start, pts[Math.floor(pts.length / 2)].day, end] : [start, end];
+    el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" style="height:${H}px" role="img" aria-label="Waist from ${waistTxt(fromUnit(pts[0].v))} to ${waistTxt(fromUnit(pts[pts.length - 1].v))} ${wUnit()}">
+      ${ticks.map((v) => `<line class="gl" x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/><text class="gt" x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${stepK < 1 ? v.toFixed(1) : v}</text>`).join("")}
+      ${xl.map((d, i) => `<text class="gt" x="${x(d)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === xl.length - 1 ? "end" : "middle"}">${shortDay(d)}</text>`).join("")}
+      <path class="avg" d="${pts.map((p, i) => `${i ? "L" : "M"}${x(p.day).toFixed(1)},${y(p.v).toFixed(1)}`).join("")}"/>
+      ${pts.map((p) => `<circle class="wdot" cx="${x(p.day).toFixed(1)}" cy="${y(p.v).toFixed(1)}" r="4.5"/>`).join("")}
+      <line class="cross" id="wcx" y1="${padT}" y2="${H - padB}" x1="-10" x2="-10"/>
+      <circle class="sel" id="wcs" r="6" cx="-10" cy="-10"/>
+    </svg>`;
+    const show = (i) => {
+      const p = pts[i];
+      const pv = pts[i - 1];
+      const n = setts() ? Math.floor(daysBetween(setts().start_date, p.week) / 7) + 1 : null;
+      ro.innerHTML = `<b>${n && n > 0 ? `Week ${n}` : shortDay(p.day)}</b> · <b class="num">${p.v.toFixed(1)} ${wUnit()}</b>${pv ? ` · ${chg(p.v - pv.v, wUnit())} on the week before` : ""}`;
+      $("#wcx").setAttribute("x1", x(p.day));
+      $("#wcx").setAttribute("x2", x(p.day));
+      $("#wcs").setAttribute("cx", x(p.day));
+      $("#wcs").setAttribute("cy", y(p.v));
+    };
+    const nearest = (cx) => {
+      const r = el.getBoundingClientRect();
+      const px = ((cx - r.left) / r.width) * W;
+      let best = 0;
+      let bd = Infinity;
+      pts.forEach((p, i) => {
+        const d = Math.abs(x(p.day) - px);
+        if (d < bd) {
+          bd = d;
+          best = i;
+        }
+      });
+      return best;
+    };
+    show(pts.length - 1);
+    const svg = $("svg", el);
+    svg.addEventListener("pointerdown", (e) => show(nearest(e.clientX)));
+    svg.addEventListener("pointermove", (e) => {
+      if (e.pointerType === "mouse" || e.buttons) show(nearest(e.clientX));
+    });
   }
 
   // ---------- photos ----------
@@ -950,6 +1109,12 @@
             <div class="field"><label for="s-kcal">Calories</label><input id="s-kcal" inputmode="numeric" placeholder="2,200"></div>
             <div class="field"><label for="s-wo">Workouts/wk</label><input id="s-wo" inputmode="numeric" value="4"></div>
           </div>
+          <div class="field"><label for="s-waist">Waist today <span>optional</span></label>
+            <div class="tk-num" style="border-top:0;margin-top:0;padding-top:0">
+              <input id="s-waist" inputmode="decimal" autocomplete="off" placeholder="Tape at your belly button">
+              <div class="opts" data-name="wunit" style="flex:0 0 auto;flex-wrap:nowrap"><button type="button" class="opt on" data-val="cm">cm</button><button type="button" class="opt" data-val="in">in</button></div>
+            </div>
+          </div>
           <div class="field"><label for="s-goal">Rough goal weight <span>optional</span></label><input id="s-goal" inputmode="decimal" autocomplete="off" placeholder="Leave it blank if it's about the mirror"></div>
           <p class="hint">Targets can change any time. Changing one only counts from that day on, so earlier weeks keep their scores.</p>
           <div class="form-err" id="s-err"></div>
@@ -969,6 +1134,14 @@
     };
     $("#s-start").onchange = showEnd;
     showEnd();
+    const wu = $('[data-name="wunit"]');
+    let unit = "cm";
+    wu.onclick = (e) => {
+      const b = e.target.closest(".opt");
+      if (!b) return;
+      unit = b.dataset.val;
+      $$(".opt", wu).forEach((x) => x.classList.toggle("on", x === b));
+    };
     $("#setupForm").onsubmit = async (e) => {
       e.preventDefault();
       const err = $("#s-err");
@@ -983,11 +1156,21 @@
             start_date: start,
             end_date: endFor(),
             goal_kg: numFrom($("#s-goal").value),
+            waist_unit: unit,
             targets: { steps: numFrom($("#s-steps").value), kcal: numFrom($("#s-kcal").value), workouts: numFrom($("#s-wo").value) },
           },
         });
         setData(r.state);
         if (wt != null && start <= td) await saveDay(td, { weight: wt });
+        const wv = numFrom($("#s-waist").value);
+        if (wv != null && start <= td) {
+          try {
+            const r2 = await api(`/cut/waist/${td}`, { method: "PUT", body: { cm: Math.round((unit === "in" ? wv * 2.54 : wv) * 10) / 10 } });
+            setData(r2.state);
+          } catch (x) {
+            fail(x);
+          }
+        }
         S.tab = "today";
         render("fade");
         toast("You're set. Weigh in each morning.");
@@ -1036,6 +1219,10 @@
         <div class="form-err" id="p-err"></div>
         <button class="btn" type="submit">Save the phase</button>
       </form>
+
+      <div class="group-title">Waist in</div>
+      <div class="seg" style="margin-bottom:6px">${[["cm", "Centimetres"], ["in", "Inches"]].map(([k, l]) => `<button class="${wUnit() === k ? "on" : ""}" data-wunit="${k}">${l}</button>`).join("")}</div>
+      <p class="hint" style="margin-bottom:6px">Saved in cm either way, so switching never changes your numbers.</p>
 
       <div class="group-title">Look</div>
       <div class="seg" style="margin-bottom:14px">${[["system", "Phone"], ["light", "Light"], ["dark", "Dark"]].map(([k, l]) => `<button class="${theme === k ? "on" : ""}" data-theme-set="${k}">${l}</button>`).join("")}</div>
@@ -1180,7 +1367,7 @@
   document.addEventListener("click", async (e) => {
     if (e.target.closest("[data-close]")) return closeSheet();
     const el = e.target.closest(
-      "[data-tab],[data-day],[data-goday],[data-tick],[data-wstep],[data-nstep],[data-range],[data-pose],[data-addphoto],[data-photo],[data-theme-set],[data-deltarget],[data-action]"
+      "[data-tab],[data-day],[data-goday],[data-tick],[data-wstep],[data-waiststep],[data-wunit],[data-nstep],[data-range],[data-pose],[data-addphoto],[data-photo],[data-theme-set],[data-deltarget],[data-action]"
     );
     if (!el || el.disabled) return;
     const d = el.dataset;
@@ -1202,6 +1389,19 @@
     }
     if (d.tick) return toggleTick(d.tick);
     if (d.wstep) return stepWeight(Number(d.wstep));
+    if (d.waiststep) return stepWaist(Number(d.waiststep));
+    if (d.wunit) {
+      if (d.wunit === wUnit()) return;
+      try {
+        const r = await api("/cut/settings", { method: "POST", body: { waist_unit: d.wunit } });
+        setData(r.state);
+        $$("[data-wunit]").forEach((b) => b.classList.toggle("on", b === el));
+        rerender();
+      } catch (x) {
+        fail(x);
+      }
+      return;
+    }
     if (d.nstep) return stepNum(d.nstep, Number(d.by));
     if (d.range) {
       S.range = d.range;

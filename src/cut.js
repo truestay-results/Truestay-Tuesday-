@@ -7,6 +7,7 @@
 //   cut_targets  steps / calories / workouts-a-week, each row in force from its from_day until the next one,
 //                so changing a target never rewrites how earlier weeks scored
 //   cut_meta     settings: phase start, phase end, a loose goal weight
+//   cut_waist    one waist measurement a week (cm), keyed by the Monday of that week
 //   cut_photos   one photo per pose per week (weeks start on Monday). A new photo for the same week and pose replaces the old one
 //   cut_blobs    the photos themselves, base64 in parts under 1 MB (D1 rows max out at 2 MB)
 
@@ -52,6 +53,7 @@ async function ensureSchema(db) {
     )`),
     db.prepare("CREATE TABLE IF NOT EXISTS cut_blobs (photo_id INTEGER NOT NULL, part INTEGER NOT NULL, b64 TEXT NOT NULL, PRIMARY KEY (photo_id, part))"),
     db.prepare("CREATE INDEX IF NOT EXISTS cut_photos_week ON cut_photos(week, pose)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS cut_waist (week TEXT PRIMARY KEY, day TEXT NOT NULL, cm REAL NOT NULL, updated_at INTEGER NOT NULL)"),
   ]);
   ready = true;
 }
@@ -66,17 +68,18 @@ async function getSettings(db) {
 }
 
 async function getState(db) {
-  const [s, d, t, p] = await db.batch([
+  const [s, d, t, p, w] = await db.batch([
     db.prepare("SELECT value FROM cut_meta WHERE key = 'settings'"),
     db.prepare("SELECT day, weight, steps, steps_hit, kcal, kcal_hit, workout, note FROM cut_days ORDER BY day"),
     db.prepare("SELECT id, from_day, steps, kcal, workouts FROM cut_targets ORDER BY from_day"),
     db.prepare("SELECT id, week, pose, day, bytes, w, h, created_at FROM cut_photos WHERE ready = 1 ORDER BY week, pose"),
+    db.prepare("SELECT week, day, cm FROM cut_waist ORDER BY week"),
   ]);
   let settings = null;
   try {
     settings = s.results[0] ? JSON.parse(s.results[0].value) : null;
   } catch {}
-  return { today: londonToday(), settings, days: d.results, targets: t.results, photos: p.results };
+  return { today: londonToday(), settings, days: d.results, targets: t.results, photos: p.results, waist: w.results };
 }
 
 // ---------- validation ----------
@@ -127,7 +130,8 @@ export async function handleCut(req, env, url, path) {
     if (!isDate(end)) bad("Pick when the phase ends");
     if (end <= start) bad("The end has to be after the start");
     const goal = has(b, "goal_kg") ? numIn(b.goal_kg, 30, 300, "The goal weight", 1) : old.goal_kg ?? null;
-    const next = { start_date: start, end_date: end, goal_kg: goal };
+    const waist_unit = has(b, "waist_unit") ? (b.waist_unit === "in" ? "in" : "cm") : old.waist_unit || "cm";
+    const next = { start_date: start, end_date: end, goal_kg: goal, waist_unit };
     const stmts = [
       db
         .prepare("INSERT INTO cut_meta (key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
@@ -205,6 +209,23 @@ export async function handleCut(req, env, url, path) {
     const first = await db.prepare("SELECT id FROM cut_targets ORDER BY from_day LIMIT 1").first();
     if (first.id === Number(m[1])) bad("That's your starting targets. Change them instead.");
     await db.prepare("DELETE FROM cut_targets WHERE id = ?").bind(Number(m[1])).run();
+    return state();
+  }
+
+  // ----- weekly waist: one a week, saved against the Monday of the week the day falls in. cm: null clears it
+  if ((m = path.match(/^\/waist\/(\d{4}-\d{2}-\d{2})$/)) && method === "PUT") {
+    const day = m[1];
+    if (!isDate(day)) bad("That date isn't valid");
+    if (day > today) bad("That day hasn't happened yet");
+    const b = await readJson(req);
+    const cm = numIn(b.cm ?? null, 40, 200, "That waist measurement", 1);
+    const week = weekOf(day);
+    if (cm == null) await db.prepare("DELETE FROM cut_waist WHERE week = ?").bind(week).run();
+    else
+      await db
+        .prepare("INSERT INTO cut_waist (week, day, cm, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(week) DO UPDATE SET day = excluded.day, cm = excluded.cm, updated_at = excluded.updated_at")
+        .bind(week, day, cm, now)
+        .run();
     return state();
   }
 

@@ -63,6 +63,7 @@ Shan's own fat loss phase. Same sign in as Pay (email, password, Face ID). Add i
   - `cut_days`: one row per day. Weight in kg, steps, calories, a workout tick, and "hit my steps" / "on my calories" ticks. A tick you set wins; otherwise typing the number sets it (steps at or over target, calories at or under)
   - `cut_targets`: steps, calories and workouts a week, each in force from its `from_day`, so changing a target never rescores earlier weeks
   - `cut_meta`: phase start and end, and an optional rough goal weight
+  - `cut_waist`: one waist measurement a week in cm, keyed by that week's Monday (the Weekly check-in card on Today). Shown in cm or inches (`waist_unit` in settings); stored in cm so switching never changes the numbers. Progress has its own waist chart (one measure per chart) and each week row shows the change
   - `cut_photos` + `cut_blobs`: one front, side and back photo a week (weeks start Monday), resized on the phone to 1400px, stored as base64 in parts under 1 MB. A new photo for the same week and pose replaces the old one. R2 isn't switched on for the account yet; if it is, photos could move there
 - Numbers: 7-day average, week and month averages, change on the week before, and a rate in kg a week from a straight line through the last 4 weeks of weigh-ins (needs about a fortnight)
 - Hourly cron clears photo uploads that never finished
