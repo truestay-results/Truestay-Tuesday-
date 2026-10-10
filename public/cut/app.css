@@ -661,3 +661,19 @@ body.cam-open { overflow: hidden; }
 .stall-line { margin-top: 10px; }
 .stall-line.ok { background: var(--green-soft); color: var(--green-ink); }
 .stall-line b { font-weight: 600; }
+
+/* diet breaks */
+.brk-line { display: flex; gap: 8px; align-items: flex-start; margin-top: 12px; padding: 10px 12px; border-radius: 14px; background: rgba(215,245,74,.1); color: var(--on-card); font-size: 13px; line-height: 1.4; }
+.brk-line svg { width: 16px; height: 16px; flex: 0 0 auto; margin-top: 1px; color: var(--lime); }
+.brk-line b { font-weight: 600; }
+.brk-tag { font-weight: 600; color: var(--ink-2); }
+.brk-list { margin-top: 6px; }
+.chart .brk-band { fill: rgba(215,245,74,.09); }
+.check-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; min-height: 52px; padding: 10px 14px; border-radius: 18px; background: var(--surface); border: 1.5px solid var(--line); font-weight: 500; font-size: 15px; }
+.switch { position: relative; width: 51px; height: 31px; flex: 0 0 auto; }
+.switch input { position: absolute; inset: 0; opacity: 0; margin: 0; cursor: pointer; z-index: 1; }
+.switch i { position: absolute; inset: 0; border-radius: 999px; background: var(--line-2); transition: background .2s; }
+.switch i::after { content: ""; position: absolute; top: 2px; left: 2px; width: 27px; height: 27px; border-radius: 50%; background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.2); transition: transform .25s var(--spring); }
+.switch input:checked + i { background: var(--lime-deep); }
+.switch input:checked + i::after { transform: translateX(20px); }
+.switch input:focus-visible + i { outline: 2px solid var(--focus); outline-offset: 2px; }

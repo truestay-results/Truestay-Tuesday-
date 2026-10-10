@@ -90,6 +90,7 @@
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/>',
     target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
     flag: '<path d="M5 21V4h11l-2 4 2 4H5"/>',
+    pause: '<rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/>',
     moon: '<path d="M20 14.5A8 8 0 0 1 9.5 4 8 8 0 1 0 20 14.5z"/>',
     out: '<path d="M9 21H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3M16 17l5-5-5-5M21 12H9"/>',
     faceid:
@@ -270,12 +271,29 @@
     if (!S.day || S.day > d.today) S.day = d.today;
   }
   const rowOf = (day) => dayMap.get(day) || null;
-  function targetOn(day) {
+  // the targets you set, ignoring diet breaks (what Settings edits)
+  function baseTargetOn(day) {
     const ts = S.data.targets;
     let t = ts[0] || { steps: null, kcal: null, workouts: null };
     for (const x of ts) if (x.from_day <= day) t = x;
     return t;
   }
+  // the targets that apply on a day: on a diet break, calories go up to maintenance
+  function targetOn(day) {
+    const t = baseTargetOn(day);
+    const b = breakOn(day);
+    return b && b.kcal ? { ...t, kcal: b.kcal, onBreak: b } : t;
+  }
+
+  // ---------- diet breaks ----------
+  // Whole weeks at maintenance. The break, and the week after it while water and food weight settle,
+  // are left out of the rate of loss and the stall check, so a planned bump doesn't read as a problem.
+  const SETTLE = 7;
+  const breaks = () => S.data.breaks || [];
+  const breakOn = (day) => breaks().find((b) => b.from_day <= day && b.to_day >= day) || null;
+  const settleEnd = (b) => addDays(b.to_day, SETTLE);
+  const quiet = (day) => breaks().some((b) => b.from_day <= day && settleEnd(b) >= day);
+  const breakWeekNo = (b, day) => Math.floor(daysBetween(b.from_day, day) / 7) + 1;
   // a tick you set wins; otherwise the number decides (steps at or over target, calories at or under)
   function stepsHit(r, t) {
     if (!r) return null;
@@ -302,7 +320,7 @@
   // kg per week from a straight line through the last 28 days of weigh-ins (needs a fortnight of data)
   function rate(endDay) {
     const from = addDays(endDay, -27);
-    const pts = weights().filter((r) => r.day >= from && r.day <= endDay);
+    const pts = weights().filter((r) => r.day >= from && r.day <= endDay && !quiet(r.day));
     if (pts.length < 6 || daysBetween(pts[0].day, pts[pts.length - 1].day) < 10) return null;
     const xs = pts.map((p) => daysBetween(from, p.day));
     const ys = pts.map((p) => p.weight);
@@ -412,6 +430,8 @@
     const nowW = avgBetween(addDays(td, -6), td);
     const thenW = avgBetween(addDays(td, -20), addDays(td, -14));
     const out = { state: "early", nowW, thenW };
+    const near = breaks().filter((b) => b.from_day <= td && settleEnd(b) >= addDays(td, -20)).pop();
+    if (near) return { ...out, state: "break", b: near, back: addDays(settleEnd(near), 21) };
     if (!s || s.start_date > addDays(td, -20) || nowW.n < 4 || thenW.n < 4) {
       const firstW = weights()[0]?.day;
       const from = [s?.start_date, firstW].filter(Boolean).sort().pop() || td;
@@ -446,7 +466,7 @@
     const calOk = calN >= 10 && calHit / calN >= 0.8;
     const stepOk = stepN < 7 || stepHit / stepN >= 0.7;
     if (!calOk || !stepOk) return { ...out, state: "loose", calOk, stepOk };
-    const t = targetOn(td);
+    const t = baseTargetOn(td);
     const lw = nowW.avg;
     const floor = round50(lw * 20);
     if (t.kcal) {
@@ -472,7 +492,7 @@
         <div class="st-a"><button class="btn sm ghost" data-action="stall-snooze">Got it</button></div>
       </section>`;
     }
-    const t = targetOn(today());
+    const t = baseTargetOn(today());
     return `<section class="stall rise" style="--i:2">
       <div class="st-h">${ic("flag")}<b>Weight's been flat for 2 weeks</b></div>
       <p>${flat} You've been on your calories ${x.calHit} of ${x.calN} days${x.stepN ? ` and hit your steps ${x.stepHit} of ${x.stepN}` : ""}, so this is a real stall, not a slip. Pick one change:</p>
@@ -489,13 +509,15 @@
     const fmtChg = (v) => `${v <= 0 ? "down" : "up"} ${Math.abs(Math.round(v * 10) / 10).toFixed(1)} kg`;
     if (x.state === "early") return { tone: "", text: x.ready ? `Stall check starts ${dayLabel(x.ready)}, once there's 3 weeks of weigh-ins.` : "Stall check needs a few more weigh-ins in the last 3 weeks." };
     if (x.state === "moving") return { tone: "ok", text: `Still moving: ${fmtChg(x.change)} on two weeks ago (${Math.abs(x.pct).toFixed(1)}%).` };
+    if (x.state === "break")
+      return { tone: "", text: x.b.from_day <= today() && x.b.to_day >= today() ? `Paused for your diet break. Back on ${dayLabel(x.back)}, once the week after it has settled.` : `Paused after your diet break while things settle. Back on ${dayLabel(x.back)}.` };
     if (x.state === "recent") return { tone: "", text: `Flat for now, but targets changed ${dayLabel(x.changed)}. Judging it from ${dayLabel(addDays(x.changed, 14))}.` };
     if (x.state === "loose") return { tone: "warn", text: `Flat for 2 weeks (${fmtChg(x.change)}), with the plan followed on too few days to judge. Tighten up first.` };
     return { tone: "warn", text: `Stalled: ${fmtChg(x.change)} in 2 weeks while on plan. There's a suggested change on Today.` };
   }
   async function applyStall(patch) {
     const td = today();
-    const t = targetOn(td);
+    const t = baseTargetOn(td);
     try {
       const r = await api("/cut/targets", { method: "POST", body: { from_day: td, steps: t.steps, kcal: t.kcal, workouts: t.workouts, ...patch } });
       setData(r.state);
@@ -594,6 +616,13 @@
             : "Weigh in each morning. The averages do the talking, not one day."
         }</div>
         <div class="saved" id="wSaved"></div>
+        ${(() => {
+          const b = breakOn(day);
+          if (b) return `<div class="brk-line">${ic("pause")}<span><b>Diet break</b> · week ${breakWeekNo(b, day)} of ${b.weeks}${b.kcal ? ` · eat to ${nfmt(b.kcal)}` : ""}. The scale goes up a bit on a break. That's water and food, not fat.</span></div>`;
+          const next = breaks().find((x) => x.from_day > day && daysBetween(day, x.from_day) <= 7);
+          if (next) return `<div class="brk-line">${ic("pause")}<span>Diet break from <b>${dayLabel(next.from_day)}</b> for ${plural(next.weeks, "week")}${next.kcal ? ` at ${nfmt(next.kcal)} kcal` : ""}.</span></div>`;
+          return "";
+        })()}
         ${
           ph
             ? `<div class="phase"><div class="pl"><span>${ph.week ? `Week ${ph.week} of ${ph.total}` : `Starts ${dayLabel(setts().start_date)}`}</span><span>${ph.left ? `${plural(ph.left, "day")} to go` : "Last day"}</span></div><div class="bar"><i style="width:${ph.pct}%"></i></div></div>`
@@ -612,7 +641,7 @@
           step: 1000,
           ph: t.steps ? nfmt(t.steps) : "e.g. 10,000",
         })}
-        ${tickCard("kcal", t.kcal ? `On ${nfmt(t.kcal)} calories` : "On my calories", kh === true, r?.kcal != null ? `${nfmt(r.kcal)} kcal logged${t.kcal ? ` · ${r.kcal <= t.kcal ? `${nfmt(t.kcal - r.kcal)} under` : `${nfmt(r.kcal - t.kcal)} over`}` : ""}` : "Tick it, or put the number in", {
+        ${tickCard("kcal", t.kcal ? `On ${nfmt(t.kcal)} calories${t.onBreak ? " (break)" : ""}` : "On my calories", kh === true, r?.kcal != null ? `${nfmt(r.kcal)} kcal logged${t.kcal ? ` · ${r.kcal <= t.kcal ? `${nfmt(t.kcal - r.kcal)} under` : `${nfmt(r.kcal - t.kcal)} over`}` : ""}` : "Tick it, or put the number in", {
           field: "kcal",
           value: r?.kcal,
           label: "Calories",
@@ -786,6 +815,7 @@
         const l = stallLine();
         return `<div class="status-line stall-line ${l.tone} rise" style="--i:1">${ic(l.tone === "ok" ? "trend" : "flag")}<span><b>Stall check</b> · ${l.text}</span></div>`;
       })()}
+      ${breaksCard()}
 
       <section class="chart-card rise" style="--i:1">
         <div class="cc-head"><h3>Weight</h3><span class="legend-row" style="margin:0"><span><i class="k-dot"></i>Daily</span><span><i class="k-line"></i>7-day avg</span>${s.goal_kg ? `<span><i class="k-goal"></i>Goal</span>` : ""}</span></div>
@@ -826,6 +856,24 @@
                .join("")}</div>`
           : ""
       }`;
+  }
+  function breaksCard() {
+    const td = today();
+    const bs = breaks();
+    const tag = (b) => (b.to_day < td ? ["Done", "neutral"] : b.from_day <= td ? ["Now", "ok"] : ["Planned", "neutral"]);
+    return `<section class="card rise" style="--i:2">
+      <div class="ch"><h3>Diet breaks</h3><button class="linkish" data-action="break-plan">Plan one</button></div>
+      ${
+        bs.length
+          ? `<div class="brk-list">${bs
+              .map((b) => {
+                const [t, tone] = tag(b);
+                return `<div class="mrow"><span>${dayLabel(b.from_day)} → ${dayLabel(b.to_day)}<small>${plural(b.weeks, "week")}${b.kcal ? ` at ${nfmt(b.kcal)} kcal` : ""}${b.extended ? " · phase pushed back" : ""}</small></span><span class="r" style="display:flex;gap:8px;align-items:center"><span class="flag ${tone}">${t}</span>${b.to_day >= td ? `<button class="linkish" data-delbreak="${b.id}" aria-label="Remove this break">Remove</button>` : ""}</span></div>`;
+              })
+              .join("")}</div>`
+          : `<p class="w-sub">A week or two at maintenance every 6 to 10 weeks makes a long cut easier to stick to. The break and the week after are left out of your rate, so the numbers stay honest.</p>`
+      }
+    </section>`;
   }
   function spark(vs) {
     if (!vs || vs.length < 2) return "";
@@ -874,7 +922,7 @@
     const change = x.avgW != null && prev?.avgW != null ? x.avgW - prev.avgW : null;
     return `<div class="wrow">
       <div class="wt">
-        <div><b>${wn && wn > 0 ? `Week ${wn}` : "Before the phase"}${x.past < 7 ? " · so far" : ""}</b><small>${weekRange(x.w)}</small>${(() => {
+        <div><b>${wn && wn > 0 ? `Week ${wn}` : "Before the phase"}${x.past < 7 ? " · so far" : ""}</b><small>${weekRange(x.w)}${breakOn(x.w) ? ` · <span class="brk-tag">Diet break</span>` : ""}</small>${(() => {
           const w = waistOf(x.w);
           if (!w) return "";
           const pv = waistBefore(x.w);
@@ -934,6 +982,16 @@
     el.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Weight from ${dayLabel(start)} to ${dayLabel(td)}: ${kg(pts[0].weight)} kg to ${kg(pts[pts.length - 1].weight)} kg">
       ${ticks.map((v) => `<line class="gl" x1="${padL}" x2="${W - padR}" y1="${y(v)}" y2="${y(v)}"/><text class="gt" x="${padL - 6}" y="${y(v) + 4}" text-anchor="end">${stepK < 1 ? v.toFixed(1) : v}</text>`).join("")}
       ${xl.map((d, i) => `<text class="gt" x="${x(d)}" y="${H - 6}" text-anchor="${i === 0 ? "start" : i === 2 ? "end" : "middle"}">${shortDay(d)}</text>`).join("")}
+      ${breaks()
+        .filter((b) => b.to_day >= start && b.from_day <= td)
+        .map((b) => {
+          const a = b.from_day < start ? start : b.from_day;
+          const z = b.to_day > td ? td : b.to_day;
+          const x1 = x(a);
+          const x2 = Math.max(x1 + 3, x(z));
+          return `<rect class="brk-band" x="${x1}" y="${padT}" width="${x2 - x1}" height="${H - padT - padB}" rx="4"/><text class="gt" x="${(x1 + x2) / 2}" y="${padT + 12}" text-anchor="middle">Break</text>`;
+        })
+        .join("")}
       ${goal ? `<line class="goal" x1="${padL}" x2="${W - padR}" y1="${y(goal)}" y2="${y(goal)}"/><text class="gt" x="${W - padR}" y="${y(goal) - 5}" text-anchor="end">Goal ${kg(goal)}</text>` : ""}
       ${pts.map((p) => `<circle class="dot" cx="${x(p.day).toFixed(1)}" cy="${y(p.weight).toFixed(1)}" r="${pts.length > 60 ? 3 : 4}"/>`).join("")}
       <path class="avg" d="${line}"/>
@@ -1142,6 +1200,75 @@
         const ws = weekStats(weekOf(day));
         if (ws.t.workouts && ws.workouts === ws.t.workouts) toast(`That's ${ws.workouts} of ${ws.t.workouts} this week. Target hit.`);
       }
+    }
+  }
+
+  // ---------- diet break planning ----------
+  function planBreak() {
+    const td = today();
+    const t = baseTargetOn(td);
+    const rt = rate(td);
+    // maintenance ≈ target + the deficit the scale says you're running (7,700 kcal a kg), kept to a sensible range
+    const deficit = rt && rt.perWeek < 0 ? Math.min(900, Math.max(250, Math.round(((-rt.perWeek * 7700) / 7) / 50) * 50)) : 500;
+    const maint = t.kcal ? t.kcal + deficit : null;
+    const nextMon = addDays(weekOf(td), 7);
+    openSheet("Plan a diet break", `
+      <form class="form" id="brkForm" novalidate>
+        <div class="two">
+          <div class="field"><label for="b-from">Week starting</label><input id="b-from" type="date" value="${nextMon}"></div>
+          <div class="field"><label for="b-kcal">Calories a day</label><input id="b-kcal" inputmode="numeric" value="${maint ? nfmt(maint) : ""}" placeholder="maintenance"></div>
+        </div>
+        <p class="hint" id="b-from-l"></p>
+        <div class="field"><span class="lab">How long</span><div class="opts" data-name="bweeks">${[1, 2, 3].map((n) => `<button type="button" class="opt${n === 2 ? " on" : ""}" data-val="${n}">${plural(n, "week")}</button>`).join("")}</div></div>
+        <label class="check-row"><span>Push the phase end back to match</span><span class="switch"><input type="checkbox" id="b-ext" checked aria-label="Push the phase end back"><i></i></span></label>
+        <p class="hint">${maint ? `${nfmt(maint)} is your ${nfmt(t.kcal)} target plus about ${nfmt(deficit)}${rt ? `, the deficit your rate of loss points to` : ", a usual deficit"}. Steps and training stay the same.` : "Put in roughly what you'd eat to hold your weight. Steps and training stay the same."}</p>
+        <div class="form-err" id="b-err"></div>
+        <button class="btn lime" type="submit">Plan the break</button>
+      </form>`, (sh) => {
+      let weeks = 2;
+      const fromL = () => {
+        const v = $("#b-from", sh).value;
+        if (!v) return;
+        const m = weekOf(v);
+        $("#b-from-l", sh).textContent = `${dayLabel(m)} to ${dayLabel(addDays(m, weeks * 7 - 1))}${m !== v ? " (breaks run Monday to Sunday)" : ""}`;
+      };
+      fromL();
+      $("#b-from", sh).onchange = fromL;
+      $('[data-name="bweeks"]', sh).onclick = (e) => {
+        const b = e.target.closest(".opt");
+        if (!b) return;
+        weeks = Number(b.dataset.val);
+        $$('[data-name="bweeks"] .opt', sh).forEach((x) => x.classList.toggle("on", x === b));
+        fromL();
+      };
+      $("#brkForm", sh).onsubmit = async (e) => {
+        e.preventDefault();
+        const err = $("#b-err", sh);
+        err.textContent = "";
+        const kcal = numFrom($("#b-kcal", sh).value);
+        if (!kcal) return (err.textContent = "Put in the calories for the break.");
+        try {
+          const r = await api("/cut/breaks", { method: "POST", body: { from_day: $("#b-from", sh).value, weeks, kcal, extend: $("#b-ext", sh).checked } });
+          setData(r.state);
+          closeSheet();
+          rerender();
+          toast(`Diet break planned${$("#b-ext", sh)?.checked ? "" : ""}. Enjoy it.`);
+        } catch (x) {
+          err.textContent = x.message;
+        }
+      };
+    });
+  }
+  async function deleteBreak(id) {
+    const b = breaks().find((x) => x.id === id);
+    if (!b || !confirm(`Remove the diet break from ${dayLabel(b.from_day)}?${b.extended ? " The phase end moves back too." : ""}`)) return;
+    try {
+      const r = await api(`/cut/breaks/${id}`, { method: "DELETE" });
+      setData(r.state);
+      rerender();
+      toast("Break removed");
+    } catch (e) {
+      fail(e);
     }
   }
 
@@ -1785,7 +1912,7 @@
   function openSettings() {
     const s = setts();
     const td = today();
-    const t = targetOn(td);
+    const t = baseTargetOn(td);
     const ph = phase(td);
     const theme = pref("theme", "system");
     openSheet("Settings", `
@@ -1970,7 +2097,7 @@
   document.addEventListener("click", async (e) => {
     if (e.target.closest("[data-close]")) return closeSheet();
     const el = e.target.closest(
-      "[data-tab],[data-day],[data-goday],[data-stall-kcal],[data-stall-steps],[data-tick],[data-wstep],[data-waiststep],[data-wunit],[data-nstep],[data-range],[data-pose],[data-addphoto],[data-photo],[data-theme-set],[data-deltarget],[data-action]"
+      "[data-tab],[data-day],[data-goday],[data-delbreak],[data-stall-kcal],[data-stall-steps],[data-tick],[data-wstep],[data-waiststep],[data-wunit],[data-nstep],[data-range],[data-pose],[data-addphoto],[data-photo],[data-theme-set],[data-deltarget],[data-action]"
     );
     if (!el || el.disabled) return;
     const d = el.dataset;
@@ -2041,6 +2168,8 @@
     if (d.action === "lifts-start") return startLifts();
     if (d.action === "lifts-edit") return editLifts();
     if (d.stallKcal) return applyStall({ kcal: Number(d.stallKcal) });
+    if (d.action === "break-plan") return planBreak();
+    if (d.delbreak) return deleteBreak(Number(d.delbreak));
     if (d.stallSteps) return applyStall({ steps: Number(d.stallSteps) });
     if (d.action === "stall-snooze") {
       setPref("stallSnooze", addDays(today(), 7));

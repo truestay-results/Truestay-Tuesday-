@@ -10,6 +10,8 @@
 //   cut_waist    one waist measurement a week (cm), keyed by the Monday of that week
 //   cut_lifts    the 3 or 4 main lifts being tracked (name, order; removing one hides it but keeps its history)
 //   cut_sets     one top set a week per lift (kg x reps), keyed by the Monday of that week
+//   cut_breaks   planned diet breaks: whole weeks (Monday to Sunday) at a maintenance calorie target.
+//                Optionally they push the phase end back by the same number of weeks (extended = 1)
 //   cut_photos   one photo per pose per week (weeks start on Monday). A new photo for the same week and pose replaces the old one
 //   cut_blobs    the photos themselves, base64 in parts under 1 MB (D1 rows max out at 2 MB)
 
@@ -56,6 +58,9 @@ async function ensureSchema(db) {
     db.prepare("CREATE TABLE IF NOT EXISTS cut_blobs (photo_id INTEGER NOT NULL, part INTEGER NOT NULL, b64 TEXT NOT NULL, PRIMARY KEY (photo_id, part))"),
     db.prepare("CREATE INDEX IF NOT EXISTS cut_photos_week ON cut_photos(week, pose)"),
     db.prepare("CREATE TABLE IF NOT EXISTS cut_waist (week TEXT PRIMARY KEY, day TEXT NOT NULL, cm REAL NOT NULL, updated_at INTEGER NOT NULL)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS cut_breaks (
+      id INTEGER PRIMARY KEY, from_day TEXT NOT NULL, to_day TEXT NOT NULL, weeks INTEGER NOT NULL, kcal INTEGER, extended INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL
+    )`),
     db.prepare("CREATE TABLE IF NOT EXISTS cut_lifts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)"),
     db.prepare(`CREATE TABLE IF NOT EXISTS cut_sets (
       week TEXT NOT NULL, lift_id INTEGER NOT NULL, day TEXT NOT NULL, kg REAL NOT NULL, reps INTEGER NOT NULL, updated_at INTEGER NOT NULL,
@@ -75,7 +80,7 @@ async function getSettings(db) {
 }
 
 async function getState(db) {
-  const [s, d, t, p, w, l, st] = await db.batch([
+  const [s, d, t, p, w, l, st, br] = await db.batch([
     db.prepare("SELECT value FROM cut_meta WHERE key = 'settings'"),
     db.prepare("SELECT day, weight, steps, steps_hit, kcal, kcal_hit, workout, note FROM cut_days ORDER BY day"),
     db.prepare("SELECT id, from_day, steps, kcal, workouts FROM cut_targets ORDER BY from_day"),
@@ -83,12 +88,13 @@ async function getState(db) {
     db.prepare("SELECT week, day, cm FROM cut_waist ORDER BY week"),
     db.prepare("SELECT id, name, sort, active FROM cut_lifts ORDER BY sort, id"),
     db.prepare("SELECT week, lift_id, day, kg, reps FROM cut_sets ORDER BY week, lift_id"),
+    db.prepare("SELECT id, from_day, to_day, weeks, kcal, extended FROM cut_breaks ORDER BY from_day"),
   ]);
   let settings = null;
   try {
     settings = s.results[0] ? JSON.parse(s.results[0].value) : null;
   } catch {}
-  return { today: londonToday(), settings, days: d.results, targets: t.results, photos: p.results, waist: w.results, lifts: l.results, sets: st.results };
+  return { today: londonToday(), settings, days: d.results, targets: t.results, photos: p.results, waist: w.results, lifts: l.results, sets: st.results, breaks: br.results };
 }
 
 // ---------- validation ----------
@@ -288,6 +294,48 @@ export async function handleCut(req, env, url, path) {
         )
         .bind(week, liftId, day, kg, reps, now)
         .run();
+    return state();
+  }
+
+  // ----- diet breaks: 1 to 3 whole weeks at maintenance, never overlapping
+  if (path === "/breaks" && method === "POST") {
+    const b = await readJson(req);
+    if (!isDate(b.from_day)) bad("Pick when the break starts");
+    const from = weekOf(b.from_day);
+    const weeks = Number(b.weeks);
+    if (![1, 2, 3].includes(weeks)) bad("A break is 1, 2 or 3 weeks");
+    const to = addDays(from, weeks * 7 - 1);
+    const kcal = numIn(b.kcal ?? null, 1000, 8000, "The maintenance calories");
+    const clash = await db.prepare("SELECT from_day FROM cut_breaks WHERE from_day <= ? AND to_day >= ?").bind(to, from).first();
+    if (clash) bad("That overlaps a break you've already planned");
+    const settings = await getSettings(db);
+    if (!settings) bad("Set up the phase first");
+    if (from < weekOf(settings.start_date)) bad("That's before the phase started");
+    const extend = !!b.extend;
+    const stmts = [
+      db.prepare("INSERT INTO cut_breaks (from_day, to_day, weeks, kcal, extended, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(from, to, weeks, kcal, extend ? 1 : 0, now),
+    ];
+    if (extend)
+      stmts.push(
+        db
+          .prepare("INSERT INTO cut_meta (key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+          .bind(JSON.stringify({ ...settings, end_date: addDays(settings.end_date, weeks * 7) }))
+      );
+    await db.batch(stmts);
+    return state();
+  }
+  if ((m = path.match(/^\/breaks\/(\d+)$/)) && method === "DELETE") {
+    const br = await db.prepare("SELECT * FROM cut_breaks WHERE id = ?").bind(Number(m[1])).first();
+    if (!br) bad("That break has gone. Pull down to refresh.");
+    const stmts = [db.prepare("DELETE FROM cut_breaks WHERE id = ?").bind(br.id)];
+    const settings = await getSettings(db);
+    if (br.extended && settings)
+      stmts.push(
+        db
+          .prepare("INSERT INTO cut_meta (key, value) VALUES ('settings', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+          .bind(JSON.stringify({ ...settings, end_date: addDays(settings.end_date, -br.weeks * 7) }))
+      );
+    await db.batch(stmts);
     return state();
   }
 
