@@ -24,6 +24,11 @@
       "binding": "LOGS_DB",
       "database_name": "truestay-logs",
       "database_id": "fd1ee796-5e79-46d9-914c-c5f5f4623540"
+    },
+    {
+      "binding": "CUT_DB",
+      "database_name": "truestay-cut",
+      "database_id": "d74ca09e-3e7a-45d0-9aa8-ab95f977d0ae"
     }
   ],
   "ai": { "binding": "AI" },

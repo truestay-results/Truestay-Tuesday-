@@ -52,3 +52,17 @@ Clients' nightly food and step screenshots, read automatically and sorted into o
   - tests: `read_unit.mjs`, `reconcile_unit.mjs` and the Angie regression (`regress_angie.mjs`, every day checked against her screenshots)
 - Which day a screenshot is for: worked out in `effDay` in `public/logs/reconcile.js`, from a date on the screenshot (not a range like "Sep 6–12"), then when it was sent, then when it was shared. A screenshot taken between midnight and 4am of a screen still showing "Today" is the night before's log. Anything it can't place goes in "Needs a day"
 - Data: D1 database `truestay-logs` (binding `LOGS_DB`). Pictures are kept as base64 in parts under 1 MB and deleted 14 days after they go in a PDF (60 days at most) by the hourly cron. Repeats (the same screen arriving a second way) are spotted after reading and dropped
+
+## TrueStay Cut (`/cut`)
+
+Shan's own fat loss phase. Same sign in as Pay (email, password, Face ID). Add it to the home screen from Safari.
+
+- Front end: `public/cut/` (`app.js` the app; Today, Progress and Photos tabs, settings from the person button)
+- API: `src/cut.js`, routes `/api/pay/cut/*` behind Pay's sign in
+- Data: D1 database `truestay-cut` (binding `CUT_DB`)
+  - `cut_days`: one row per day. Weight in kg, steps, calories, a workout tick, and "hit my steps" / "on my calories" ticks. A tick you set wins; otherwise typing the number sets it (steps at or over target, calories at or under)
+  - `cut_targets`: steps, calories and workouts a week, each in force from its `from_day`, so changing a target never rescores earlier weeks
+  - `cut_meta`: phase start and end, and an optional rough goal weight
+  - `cut_photos` + `cut_blobs`: one front, side and back photo a week (weeks start Monday), resized on the phone to 1400px, stored as base64 in parts under 1 MB. A new photo for the same week and pose replaces the old one. R2 isn't switched on for the account yet; if it is, photos could move there
+- Numbers: 7-day average, week and month averages, change on the week before, and a rate in kg a week from a straight line through the last 4 weeks of weigh-ins (needs about a fortnight)
+- Hourly cron clears photo uploads that never finished

@@ -4,6 +4,7 @@
 
 import { handlePay, payCron } from "./pay.js";
 import { handleLogsShare, logsCron, readerFetch } from "./logs.js";
+import { cutCron } from "./cut.js";
 
 const json = (data, status = 200) =>
   new Response(JSON.stringify(data), {
@@ -40,6 +41,7 @@ export default {
   async scheduled(event, env, ctx) {
     ctx.waitUntil(payCron(env));
     ctx.waitUntil(logsCron(env, ctx).catch((e) => console.error("logs cron", e && e.message)));
+    ctx.waitUntil(cutCron(env).catch((e) => console.error("cut cron", e && e.message)));
   },
 };
 

@@ -1,0 +1,17 @@
+{
+  "name": "TrueStay Cut",
+  "short_name": "TS Cut",
+  "description": "Daily weigh-ins, steps, calories, training and weekly progress photos",
+  "id": "/cut/",
+  "start_url": "/cut/",
+  "scope": "/cut/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#E3E8E5",
+  "theme_color": "#E3E8E5",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

@@ -27,6 +27,7 @@ import {
 import { vapidKeys, pushAll } from "./pay-push.js";
 import { ensureIncomeSchema, generateIncome, handleIncome } from "./pay-income.js";
 import { handleLogsApp } from "./logs.js";
+import { handleCut } from "./cut.js";
 
 const LOCK_OPTIONS = [0, 1, 5, 15, 60, 240];
 // Server-side idle window. "Every open" (1) gets a 2 minute window; the app's own lock screen handles re-opening.
@@ -590,6 +591,8 @@ export async function handlePay(req, env, url, ctx) {
 
     // TrueStay Logs (/logs) shares this sign-in
     if (path.startsWith("/logs/")) return await handleLogsApp(req, env, url, path.slice("/logs".length), ctx); // await, so its errors land in the catch below
+    // TrueStay Cut (/cut) too
+    if (path.startsWith("/cut/")) return await handleCut(req, env, url, path.slice("/cut".length));
 
     if (path === "/data" && method === "GET") return json(await getData(env));
 
