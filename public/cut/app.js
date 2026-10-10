@@ -400,6 +400,112 @@
     return { n: xs.length, xs, vs, base, last, pct, drops, status, bw, unit: bw ? "reps" : "kg" };
   }
   const LIFT_TAG = { new: ["Starting point", "neutral"], up: ["Up", "ok"], hold: ["Holding", "ok"], slip: ["Slipping", "warn"], drop: ["Dropping", "red"], none: ["No sets yet", "neutral"] };
+  // ---------- stall spotter ----------
+  // Compares this week's 7-day average with the 7 days that ended two weeks ago. Under 0.25% of bodyweight
+  // lost in that fortnight is flat. Only suggests a change when the plan was actually followed
+  // (calories on target 80%+ of logged days, steps 70%+), and never within 2 weeks of a target change.
+  // One change at a time: 100 to 150 kcal fewer, or 2,000 more steps. Calories never go below about 20 kcal per kg.
+  const round50 = (v) => Math.round(v / 50) * 50;
+  function stallCheck() {
+    const td = today();
+    const s = setts();
+    const nowW = avgBetween(addDays(td, -6), td);
+    const thenW = avgBetween(addDays(td, -20), addDays(td, -14));
+    const out = { state: "early", nowW, thenW };
+    if (!s || s.start_date > addDays(td, -20) || nowW.n < 4 || thenW.n < 4) {
+      const firstW = weights()[0]?.day;
+      const from = [s?.start_date, firstW].filter(Boolean).sort().pop() || td;
+      out.ready = addDays(from, 20) > td ? addDays(from, 20) : null;
+      return out;
+    }
+    out.change = nowW.avg - thenW.avg;
+    out.pct = (out.change / thenW.avg) * 100;
+    let calHit = 0;
+    let calN = 0;
+    let stepHit = 0;
+    let stepN = 0;
+    for (let i = 14; i >= 1; i--) {
+      const d = addDays(td, -i);
+      const r = rowOf(d);
+      const t = targetOn(d);
+      const k = kcalHit(r, t);
+      const st = stepsHit(r, t);
+      if (k != null) {
+        calN++;
+        if (k) calHit++;
+      }
+      if (st != null) {
+        stepN++;
+        if (st) stepHit++;
+      }
+    }
+    Object.assign(out, { calHit, calN, stepHit, stepN });
+    if (out.pct <= -0.25) return { ...out, state: "moving" };
+    const changed = S.data.targets.filter((t) => t.from_day > addDays(td, -14) && t.from_day <= td).pop();
+    if (changed) return { ...out, state: "recent", changed: changed.from_day };
+    const calOk = calN >= 10 && calHit / calN >= 0.8;
+    const stepOk = stepN < 7 || stepHit / stepN >= 0.7;
+    if (!calOk || !stepOk) return { ...out, state: "loose", calOk, stepOk };
+    const t = targetOn(td);
+    const lw = nowW.avg;
+    const floor = round50(lw * 20);
+    if (t.kcal) {
+      const k = round50(t.kcal - (t.kcal >= 2000 ? 150 : 100));
+      if (k >= floor) out.kcal = k;
+    }
+    if (!t.steps || t.steps <= 18000) out.steps = Math.min(20000, (t.steps || 8000) + 2000);
+    return { ...out, state: "stalled" };
+  }
+  const snoozed = () => pref("stallSnooze", "") >= today();
+  function stallCard() {
+    const x = stallCheck();
+    if (x.state !== "stalled" && x.state !== "loose") return "";
+    if (snoozed()) return "";
+    const flat = `Your 7-day average is <b class="num">${kg(x.nowW.avg)}</b>, against <b class="num">${kg(x.thenW.avg)}</b> two weeks ago.`;
+    if (x.state === "loose") {
+      const bits = [];
+      if (!x.calOk) bits.push(x.calN < 10 ? `calories logged on only ${x.calN} of the last 14 days` : `on your calories ${x.calHit} of ${x.calN} days`);
+      if (!x.stepOk) bits.push(`steps hit ${x.stepHit} of ${x.stepN} days`);
+      return `<section class="stall rise" style="--i:2">
+        <div class="st-h">${ic("flag")}<b>Weight's flat, but the plan isn't the problem yet</b></div>
+        <p>${flat} Over that fortnight you were ${bits.join(" and ")}. Tighten that up for 2 weeks before changing any targets.</p>
+        <div class="st-a"><button class="btn sm ghost" data-action="stall-snooze">Got it</button></div>
+      </section>`;
+    }
+    const t = targetOn(today());
+    return `<section class="stall rise" style="--i:2">
+      <div class="st-h">${ic("flag")}<b>Weight's been flat for 2 weeks</b></div>
+      <p>${flat} You've been on your calories ${x.calHit} of ${x.calN} days${x.stepN ? ` and hit your steps ${x.stepHit} of ${x.stepN}` : ""}, so this is a real stall, not a slip. Pick one change:</p>
+      <div class="st-a">
+        ${x.kcal ? `<button class="btn sm lime" data-stall-kcal="${x.kcal}">Drop to ${nfmt(x.kcal)} kcal</button>` : ""}
+        ${x.steps ? `<button class="btn sm ${x.kcal ? "ghost" : "lime"}" data-stall-steps="${x.steps}">Go to ${nfmt(x.steps)} steps</button>` : ""}
+        <button class="linkish" data-action="stall-snooze">Not yet</button>
+      </div>
+      <p class="st-note">${x.kcal ? `That's ${nfmt(t.kcal - x.kcal)} fewer a day.` : t.kcal ? "Calories are already about as low as they should go, so steps it is." : ""} One change, then give it 2 weeks. A flat fortnight can also be water: bad sleep, more salt or a new training block.</p>
+    </section>`;
+  }
+  function stallLine() {
+    const x = stallCheck();
+    const fmtChg = (v) => `${v <= 0 ? "down" : "up"} ${Math.abs(Math.round(v * 10) / 10).toFixed(1)} kg`;
+    if (x.state === "early") return { tone: "", text: x.ready ? `Stall check starts ${dayLabel(x.ready)}, once there's 3 weeks of weigh-ins.` : "Stall check needs a few more weigh-ins in the last 3 weeks." };
+    if (x.state === "moving") return { tone: "ok", text: `Still moving: ${fmtChg(x.change)} on two weeks ago (${Math.abs(x.pct).toFixed(1)}%).` };
+    if (x.state === "recent") return { tone: "", text: `Flat for now, but targets changed ${dayLabel(x.changed)}. Judging it from ${dayLabel(addDays(x.changed, 14))}.` };
+    if (x.state === "loose") return { tone: "warn", text: `Flat for 2 weeks (${fmtChg(x.change)}), with the plan followed on too few days to judge. Tighten up first.` };
+    return { tone: "warn", text: `Stalled: ${fmtChg(x.change)} in 2 weeks while on plan. There's a suggested change on Today.` };
+  }
+  async function applyStall(patch) {
+    const td = today();
+    const t = targetOn(td);
+    try {
+      const r = await api("/cut/targets", { method: "POST", body: { from_day: td, steps: t.steps, kcal: t.kcal, workouts: t.workouts, ...patch } });
+      setData(r.state);
+      rerender();
+      toast(`${patch.kcal ? `Calories now ${nfmt(patch.kcal)}` : `Steps now ${nfmt(patch.steps)}`} from today. Give it 2 weeks.`);
+    } catch (e) {
+      fail(e);
+    }
+  }
+
   function strength() {
     const ts = liveLifts().map((l) => ({ l, t: liftTrend(l) }));
     const scored = ts.filter((x) => x.t.n >= 2);
@@ -494,6 +600,8 @@
             : ""
         }
       </section>
+
+      ${isToday ? stallCard() : ""}
 
       <div class="ticks">
         ${tickCard("workout", "Trained", r?.workout === 1, ws.t.workouts ? `${ws.workouts} of ${ws.t.workouts} this week` : `${plural(ws.workouts, "session")} this week`)}
@@ -674,6 +782,10 @@
           <div>${s.goal_kg ? "To rough goal" : "Phase"}<b class="num">${s.goal_kg ? (toGoal != null ? (toGoal > 0 ? kg(toGoal) : "Hit") : "—") : ph ? `${ph.week}/${ph.total}` : "—"}</b><small>${s.goal_kg ? `goal ${kg(s.goal_kg)} kg` : "weeks"}</small></div>
         </div>
       </section>
+      ${(() => {
+        const l = stallLine();
+        return `<div class="status-line stall-line ${l.tone} rise" style="--i:1">${ic(l.tone === "ok" ? "trend" : "flag")}<span><b>Stall check</b> · ${l.text}</span></div>`;
+      })()}
 
       <section class="chart-card rise" style="--i:1">
         <div class="cc-head"><h3>Weight</h3><span class="legend-row" style="margin:0"><span><i class="k-dot"></i>Daily</span><span><i class="k-line"></i>7-day avg</span>${s.goal_kg ? `<span><i class="k-goal"></i>Goal</span>` : ""}</span></div>
@@ -1858,7 +1970,7 @@
   document.addEventListener("click", async (e) => {
     if (e.target.closest("[data-close]")) return closeSheet();
     const el = e.target.closest(
-      "[data-tab],[data-day],[data-goday],[data-tick],[data-wstep],[data-waiststep],[data-wunit],[data-nstep],[data-range],[data-pose],[data-addphoto],[data-photo],[data-theme-set],[data-deltarget],[data-action]"
+      "[data-tab],[data-day],[data-goday],[data-stall-kcal],[data-stall-steps],[data-tick],[data-wstep],[data-waiststep],[data-wunit],[data-nstep],[data-range],[data-pose],[data-addphoto],[data-photo],[data-theme-set],[data-deltarget],[data-action]"
     );
     if (!el || el.disabled) return;
     const d = el.dataset;
@@ -1928,6 +2040,13 @@
     if (d.action === "settings") return openSettings();
     if (d.action === "lifts-start") return startLifts();
     if (d.action === "lifts-edit") return editLifts();
+    if (d.stallKcal) return applyStall({ kcal: Number(d.stallKcal) });
+    if (d.stallSteps) return applyStall({ steps: Number(d.stallSteps) });
+    if (d.action === "stall-snooze") {
+      setPref("stallSnooze", addDays(today(), 7));
+      toast("Hidden for a week. It's still on Progress.");
+      return rerender();
+    }
     if (d.action === "logout") {
       try {
         await api("/logout", { method: "POST", raw: true });

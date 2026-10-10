@@ -647,3 +647,17 @@ body.cam-open { overflow: hidden; }
   .spark { width: 64px; }
 }
 .flag.neutral { background: var(--surface-2); color: var(--ink-2); }
+
+/* stall spotter */
+.stall { margin-top: 12px; padding: 14px 16px 16px; border-radius: var(--r-lg); background: var(--amber-soft); color: var(--ink); border: 1px solid rgba(232,154,28,.35); }
+.stall .st-h { display: flex; align-items: center; gap: 8px; color: var(--amber-ink); }
+.stall .st-h svg { width: 18px; height: 18px; flex: 0 0 auto; }
+.stall .st-h b { font-size: 16px; font-weight: 600; }
+.stall p { font-size: 14px; line-height: 1.45; margin-top: 8px; color: var(--ink-2); }
+.stall p b { color: var(--ink); font-weight: 600; }
+.stall .st-a { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 12px; }
+.stall .st-note { font-size: 13px; color: var(--ink-2); }
+.stall .btn.ghost { border-color: rgba(138,90,8,.35); }
+.stall-line { margin-top: 10px; }
+.stall-line.ok { background: var(--green-soft); color: var(--green-ink); }
+.stall-line b { font-weight: 600; }
