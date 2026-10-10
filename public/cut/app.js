@@ -1038,12 +1038,16 @@
     });
     return { b64, w, h };
   }
-  async function uploadPhoto(file, { week, pose }) {
+  async function uploadPhoto(file, target) {
+    return sendPhoto(() => toJpeg(file), target);
+  }
+  // prep() returns { b64, w, h }: from a picked file, or straight from the camera
+  async function sendPhoto(prep, { week, pose }) {
     const key = `${week}:${pose}`;
     S.uploading[key] = true;
     rerender();
     try {
-      const { b64, w, h } = await toJpeg(file);
+      const { b64, w, h } = await prep();
       const td = today();
       const day = week === weekOf(td) ? td : addDays(week, 6) < td ? addDays(week, 6) : td;
       const r = await api("/cut/photos", { method: "POST", body: { pose, day, data: b64, mime: "image/jpeg", w, h } });
@@ -1057,6 +1061,241 @@
       rerender();
     }
   }
+  // ---------- camera with a ghost of an earlier photo ----------
+  // The live picture and the ghost sit in the same 3:4 frame, both cropped the same way, so lining up
+  // with the ghost means the saved photo lines up with the old one. The front camera shows mirrored
+  // (like a mirror) with the ghost mirrored to match, and saves the right way round.
+  let cam = null;
+  const camPref = () => ({
+    facing: pref("facing", "user"),
+    ghost: Number(pref("ghost", "35")),
+    timer: Number(pref("timer", "3")),
+    ghostFrom: pref("ghostFrom", "last"),
+  });
+  function ghostFor(week, pose, from) {
+    const earlier = S.data.photos.filter((p) => p.pose === pose && p.week < week).sort((a, b) => (a.week < b.week ? -1 : 1));
+    if (!earlier.length) return null;
+    return from === "first" ? earlier[0] : earlier[earlier.length - 1];
+  }
+  const weekName = (w) => {
+    const n = setts() ? Math.floor(daysBetween(setts().start_date, w) / 7) + 1 : null;
+    return n && n > 0 ? `Week ${n}` : weekRange(w);
+  };
+  async function openCamera(week, pose) {
+    if (!navigator.mediaDevices?.getUserMedia) return startPhoto(week, pose);
+    closeSheet(true);
+    const P = camPref();
+    cam = { week, pose, facing: P.facing, stream: null, shot: null, counting: null };
+    const el = document.createElement("div");
+    el.className = "cam";
+    el.setAttribute("role", "dialog");
+    el.setAttribute("aria-modal", "true");
+    el.setAttribute("aria-label", `${POSE[pose]} photo camera`);
+    document.body.append(el);
+    document.body.classList.add("cam-open");
+    cam.el = el;
+    drawCamera();
+    await startStream();
+  }
+  function drawCamera() {
+    const P = camPref();
+    const g = ghostFor(cam.week, cam.pose, P.ghostFrom);
+    const hasFirst = ghostFor(cam.week, cam.pose, "first");
+    const multi = hasFirst && g && hasFirst.id !== ghostFor(cam.week, cam.pose, "last").id;
+    const mirror = cam.facing === "user";
+    cam.el.innerHTML = `
+      <div class="cam-top">
+        <button class="cam-btn" data-cam="close" aria-label="Close camera">${ic("x")}</button>
+        <div class="cam-title"><b>${POSE[cam.pose]}</b><small>${weekName(cam.week)}${g ? ` · ghost of ${weekName(g.week)}` : ""}</small></div>
+        <button class="cam-btn" data-cam="flip" aria-label="Switch camera" ${cam.shot ? "disabled" : ""}>${ic("swap")}</button>
+      </div>
+      <div class="cam-frame">
+        ${cam.shot ? `<img class="cam-shot" src="${cam.shot.url}" alt="The photo you just took">` : `<video id="camVideo" class="${mirror ? "mirror" : ""}" playsinline muted autoplay></video>`}
+        ${g ? `<img class="cam-ghost${mirror && !cam.shot ? " mirror" : ""}" src="${photoUrl(g)}" alt="" style="opacity:${P.ghost / 100}">` : ""}
+        <i class="cam-line" aria-hidden="true"></i>
+        <div class="cam-count" id="camCount" aria-live="assertive"></div>
+        <div class="cam-msg" id="camMsg">${g ? "" : `Your first ${POSE[cam.pose].toLowerCase()} photo. Next week's lines up with this one.`}</div>
+      </div>
+      <div class="cam-ctrls">
+        ${
+          g
+            ? `<label class="cam-ghost-ctl"><span>Ghost</span><input type="range" id="camGhost" min="0" max="70" step="5" value="${P.ghost}" aria-label="Ghost strength"><span class="num" id="camGhostV">${P.ghost}%</span></label>
+               ${multi ? `<div class="seg cam-seg" aria-label="Ghost from">${[["last", "Last time"], ["first", "First week"]].map(([k, l]) => `<button class="${P.ghostFrom === k ? "on" : ""}" data-cam="from-${k}">${l}</button>`).join("")}</div>` : ""}`
+            : ""
+        }
+        ${
+          cam.shot
+            ? `<div class="cam-review">
+                 <button class="btn ghost on-dark" data-cam="retake">Retake</button>
+                 <button class="btn lime" data-cam="use">${ic("check")} Use photo</button>
+               </div>`
+            : `<div class="seg cam-seg" aria-label="Timer">${[[0, "No timer"], [3, "3 sec"], [10, "10 sec"]].map(([k, l]) => `<button class="${P.timer === k ? "on" : ""}" data-cam="timer-${k}">${l}</button>`).join("")}</div>
+               <div class="cam-shoot">
+                 <button class="cam-lib" data-cam="library">Library</button>
+                 <button class="shutter" data-cam="shoot" aria-label="Take photo"><i></i></button>
+                 <span class="cam-lib-sp"></span>
+               </div>`
+        }
+      </div>`;
+    const v = $("#camVideo", cam.el);
+    if (v && cam.stream) {
+      v.srcObject = cam.stream;
+      v.play().catch(() => {});
+    }
+    const gr = $("#camGhost", cam.el);
+    if (gr)
+      gr.oninput = () => {
+        setPref("ghost", gr.value);
+        $("#camGhostV", cam.el).textContent = gr.value + "%";
+        const gi = $(".cam-ghost", cam.el);
+        if (gi) gi.style.opacity = gr.value / 100;
+      };
+  }
+  async function startStream() {
+    stopStream();
+    const msg = () => $("#camMsg", cam?.el);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: cam.facing, width: { ideal: 1920 }, height: { ideal: 1920 } },
+        audio: false,
+      });
+      if (!cam) return stream.getTracks().forEach((t) => t.stop());
+      cam.stream = stream;
+      const v = $("#camVideo", cam.el);
+      if (v) {
+        v.srcObject = stream;
+        await v.play().catch(() => {});
+      }
+    } catch (e) {
+      if (!cam) return;
+      const denied = e && (e.name === "NotAllowedError" || e.name === "SecurityError");
+      const m = msg();
+      if (m) {
+        m.classList.add("show");
+        m.innerHTML = `${denied ? "Camera access is off for this app." : "The camera didn't start."} <button class="linkish on-dark" data-cam="library">Pick from your photos instead</button>${denied ? "<br><small>To turn it on: Settings, Safari (or the app), Camera, Allow.</small>" : ""}`;
+      }
+    }
+  }
+  function stopStream() {
+    if (cam?.stream) cam.stream.getTracks().forEach((t) => t.stop());
+    if (cam) cam.stream = null;
+  }
+  function closeCamera() {
+    if (!cam) return;
+    clearInterval(cam.counting);
+    stopStream();
+    if (cam.shot) URL.revokeObjectURL(cam.shot.url);
+    cam.el.remove();
+    document.body.classList.remove("cam-open");
+    cam = null;
+  }
+  function shoot() {
+    const P = camPref();
+    if (!cam?.stream || cam.counting) return;
+    if (!P.timer) return capture();
+    let n = P.timer;
+    const c = $("#camCount", cam.el);
+    c.textContent = n;
+    c.classList.add("show");
+    haptic();
+    cam.counting = setInterval(() => {
+      n -= 1;
+      if (!cam) return;
+      if (n <= 0) {
+        clearInterval(cam.counting);
+        cam.counting = null;
+        c.classList.remove("show");
+        return capture();
+      }
+      c.textContent = n;
+      haptic();
+    }, 1000);
+  }
+  async function capture() {
+    const v = $("#camVideo", cam.el);
+    if (!v || !v.videoWidth) return toast("The camera isn't ready yet.");
+    const vw = v.videoWidth;
+    const vh = v.videoHeight;
+    // the same centre crop to 3:4 that the frame shows
+    let sw = vw;
+    let sh = vh;
+    if (vw / vh > 3 / 4) sw = Math.round(vh * 0.75);
+    else sh = Math.round(vw / 0.75);
+    const sx = Math.round((vw - sw) / 2);
+    const sy = Math.round((vh - sh) / 2);
+    const scale = Math.min(1, PHOTO_MAX / sh);
+    const w = Math.round(sw * scale);
+    const h = Math.round(sh * scale);
+    const c = document.createElement("canvas");
+    c.width = w;
+    c.height = h;
+    c.getContext("2d").drawImage(v, sx, sy, sw, sh, 0, 0, w, h); // saved the right way round, not mirrored
+    const blob = await new Promise((r) => c.toBlob(r, "image/jpeg", 0.86));
+    c.width = c.height = 0;
+    if (!blob) return toast("Couldn't take that photo. Try again.");
+    haptic();
+    const fl = document.createElement("div");
+    fl.className = "cam-flash";
+    cam.el.append(fl);
+    setTimeout(() => fl.remove(), 400);
+    stopStream();
+    cam.shot = { blob, w, h, url: URL.createObjectURL(blob) };
+    drawCamera();
+  }
+  async function useShot() {
+    const { blob, w, h } = cam.shot;
+    const target = { week: cam.week, pose: cam.pose };
+    closeCamera();
+    await sendPhoto(async () => {
+      const b64 = await new Promise((res, rej) => {
+        const fr = new FileReader();
+        fr.onload = () => res(String(fr.result).replace(/^data:[^,]*,/, ""));
+        fr.onerror = () => rej(new Error("Couldn't read that photo"));
+        fr.readAsDataURL(blob);
+      });
+      return { b64, w, h };
+    }, target);
+  }
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("[data-cam]");
+    if (!b || !cam || b.disabled) return;
+    e.stopPropagation();
+    const a = b.dataset.cam;
+    if (a === "close") return closeCamera();
+    if (a === "flip") {
+      cam.facing = cam.facing === "user" ? "environment" : "user";
+      setPref("facing", cam.facing);
+      drawCamera();
+      return startStream();
+    }
+    if (a.startsWith("timer-")) {
+      setPref("timer", a.slice(6));
+      $$('[data-cam^="timer-"]', cam.el).forEach((x) => x.classList.toggle("on", x === b));
+      return;
+    }
+    if (a.startsWith("from-")) {
+      setPref("ghostFrom", a.slice(5));
+      return drawCamera();
+    }
+    if (a === "shoot") return shoot();
+    if (a === "retake") {
+      URL.revokeObjectURL(cam.shot.url);
+      cam.shot = null;
+      drawCamera();
+      return startStream();
+    }
+    if (a === "use") return useShot();
+    if (a === "library") {
+      const { week, pose } = cam;
+      closeCamera();
+      return startPhoto(week, pose);
+    }
+  }, true);
+  document.addEventListener("visibilitychange", () => {
+    // iOS stops the camera when the app goes to the background; start it again on return
+    if (document.visibilityState === "visible" && cam && !cam.shot) startStream();
+  });
+
   function openPhoto(id) {
     const p = S.data.photos.find((x) => x.id === id);
     if (!p) return;
@@ -1071,7 +1310,7 @@
       </div>`, (sh) => {
       $("#phSwap", sh).onclick = () => {
         closeSheet();
-        startPhoto(p.week, p.pose);
+        openCamera(p.week, p.pose);
       };
       $("#phDel", sh).onclick = async () => {
         if (!confirm(`Delete this ${POSE[p.pose].toLowerCase()} photo?`)) return;
@@ -1413,7 +1652,7 @@
       S.cmpA = S.cmpB = null;
       return rerender();
     }
-    if (d.addphoto) return startPhoto(d.week, d.addphoto);
+    if (d.addphoto) return openCamera(d.week, d.addphoto);
     if (d.photo) return openPhoto(Number(d.photo));
     if (d.themeSet) {
       setPref("theme", d.themeSet);
@@ -1448,7 +1687,10 @@
       e.preventDefault();
       e.target.click();
     }
-    if (e.key === "Escape") closeSheet();
+    if (e.key === "Escape") {
+      if (cam) return closeCamera();
+      closeSheet();
+    }
   });
   $("#picker").addEventListener("change", (e) => {
     const f = e.target.files[0];
