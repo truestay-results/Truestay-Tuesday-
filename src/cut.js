@@ -8,6 +8,8 @@
 //                so changing a target never rewrites how earlier weeks scored
 //   cut_meta     settings: phase start, phase end, a loose goal weight
 //   cut_waist    one waist measurement a week (cm), keyed by the Monday of that week
+//   cut_lifts    the 3 or 4 main lifts being tracked (name, order; removing one hides it but keeps its history)
+//   cut_sets     one top set a week per lift (kg x reps), keyed by the Monday of that week
 //   cut_photos   one photo per pose per week (weeks start on Monday). A new photo for the same week and pose replaces the old one
 //   cut_blobs    the photos themselves, base64 in parts under 1 MB (D1 rows max out at 2 MB)
 
@@ -54,6 +56,11 @@ async function ensureSchema(db) {
     db.prepare("CREATE TABLE IF NOT EXISTS cut_blobs (photo_id INTEGER NOT NULL, part INTEGER NOT NULL, b64 TEXT NOT NULL, PRIMARY KEY (photo_id, part))"),
     db.prepare("CREATE INDEX IF NOT EXISTS cut_photos_week ON cut_photos(week, pose)"),
     db.prepare("CREATE TABLE IF NOT EXISTS cut_waist (week TEXT PRIMARY KEY, day TEXT NOT NULL, cm REAL NOT NULL, updated_at INTEGER NOT NULL)"),
+    db.prepare("CREATE TABLE IF NOT EXISTS cut_lifts (id INTEGER PRIMARY KEY, name TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL)"),
+    db.prepare(`CREATE TABLE IF NOT EXISTS cut_sets (
+      week TEXT NOT NULL, lift_id INTEGER NOT NULL, day TEXT NOT NULL, kg REAL NOT NULL, reps INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+      PRIMARY KEY (week, lift_id)
+    )`),
   ]);
   ready = true;
 }
@@ -68,18 +75,20 @@ async function getSettings(db) {
 }
 
 async function getState(db) {
-  const [s, d, t, p, w] = await db.batch([
+  const [s, d, t, p, w, l, st] = await db.batch([
     db.prepare("SELECT value FROM cut_meta WHERE key = 'settings'"),
     db.prepare("SELECT day, weight, steps, steps_hit, kcal, kcal_hit, workout, note FROM cut_days ORDER BY day"),
     db.prepare("SELECT id, from_day, steps, kcal, workouts FROM cut_targets ORDER BY from_day"),
     db.prepare("SELECT id, week, pose, day, bytes, w, h, created_at FROM cut_photos WHERE ready = 1 ORDER BY week, pose"),
     db.prepare("SELECT week, day, cm FROM cut_waist ORDER BY week"),
+    db.prepare("SELECT id, name, sort, active FROM cut_lifts ORDER BY sort, id"),
+    db.prepare("SELECT week, lift_id, day, kg, reps FROM cut_sets ORDER BY week, lift_id"),
   ]);
   let settings = null;
   try {
     settings = s.results[0] ? JSON.parse(s.results[0].value) : null;
   } catch {}
-  return { today: londonToday(), settings, days: d.results, targets: t.results, photos: p.results, waist: w.results };
+  return { today: londonToday(), settings, days: d.results, targets: t.results, photos: p.results, waist: w.results, lifts: l.results, sets: st.results };
 }
 
 // ---------- validation ----------
@@ -225,6 +234,59 @@ export async function handleCut(req, env, url, path) {
       await db
         .prepare("INSERT INTO cut_waist (week, day, cm, updated_at) VALUES (?, ?, ?, ?) ON CONFLICT(week) DO UPDATE SET day = excluded.day, cm = excluded.cm, updated_at = excluded.updated_at")
         .bind(week, day, cm, now)
+        .run();
+    return state();
+  }
+
+  // ----- strength: the main lifts, and one top set a week for each
+  if (path === "/lifts" && method === "POST") {
+    // add one or more lifts by name; a name that's already there (even removed) comes back instead of doubling up
+    const b = await readJson(req);
+    const names = (Array.isArray(b.names) ? b.names : [b.name]).map((n) => String(n ?? "").trim().slice(0, 40)).filter(Boolean);
+    if (!names.length) bad("Name the lift");
+    const have = (await db.prepare("SELECT id, name, active FROM cut_lifts").all()).results;
+    const live = have.filter((x) => x.active).length;
+    const fresh = names.filter((n) => !have.some((x) => x.active && x.name.toLowerCase() === n.toLowerCase()));
+    if (live + fresh.length > 6) bad("Six lifts at most. Keep it to the ones that matter.");
+    let sort = (await db.prepare("SELECT COALESCE(MAX(sort), 0) AS m FROM cut_lifts").first()).m;
+    const stmts = [];
+    for (const n of fresh) {
+      const old = have.find((x) => !x.active && x.name.toLowerCase() === n.toLowerCase());
+      sort += 1;
+      if (old) stmts.push(db.prepare("UPDATE cut_lifts SET active = 1, sort = ? WHERE id = ?").bind(sort, old.id));
+      else stmts.push(db.prepare("INSERT INTO cut_lifts (name, sort, active, created_at) VALUES (?, ?, 1, ?)").bind(n, sort, now));
+    }
+    if (stmts.length) await db.batch(stmts);
+    return state();
+  }
+  if ((m = path.match(/^\/lifts\/(\d+)$/)) && method === "PUT") {
+    const b = await readJson(req);
+    const id = Number(m[1]);
+    const old = await db.prepare("SELECT * FROM cut_lifts WHERE id = ?").bind(id).first();
+    if (!old) bad("That lift has gone. Pull down to refresh.");
+    const name = has(b, "name") ? String(b.name ?? "").trim().slice(0, 40) || bad("Name the lift") : old.name;
+    const active = has(b, "active") ? (b.active ? 1 : 0) : old.active;
+    await db.prepare("UPDATE cut_lifts SET name = ?, active = ? WHERE id = ?").bind(name, active, id).run();
+    return state();
+  }
+  if ((m = path.match(/^\/sets\/(\d{4}-\d{2}-\d{2})\/(\d+)$/)) && method === "PUT") {
+    const day = m[1];
+    const liftId = Number(m[2]);
+    if (!isDate(day)) bad("That date isn't valid");
+    if (day > today) bad("That day hasn't happened yet");
+    if (!(await db.prepare("SELECT 1 FROM cut_lifts WHERE id = ?").bind(liftId).first())) bad("That lift has gone. Pull down to refresh.");
+    const b = await readJson(req);
+    const week = weekOf(day);
+    const kg = numIn(b.kg ?? null, 0, 500, "That weight", 2);
+    const reps = numIn(b.reps ?? null, 1, 50, "That number of reps");
+    if (kg == null || reps == null) await db.prepare("DELETE FROM cut_sets WHERE week = ? AND lift_id = ?").bind(week, liftId).run();
+    else
+      await db
+        .prepare(
+          `INSERT INTO cut_sets (week, lift_id, day, kg, reps, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(week, lift_id) DO UPDATE SET day = excluded.day, kg = excluded.kg, reps = excluded.reps, updated_at = excluded.updated_at`
+        )
+        .bind(week, liftId, day, kg, reps, now)
         .run();
     return state();
   }

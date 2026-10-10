@@ -615,3 +615,35 @@ body.cam-open { overflow: hidden; }
 .btn.ghost.on-dark { color: #F1F4EC; border-color: rgba(255,255,255,.3); }
 .linkish.on-dark { color: var(--lime); }
 .cam-btn, .cam-lib, .shutter { position: relative; }
+
+/* strength */
+.lift-ideas { margin-top: 12px; }
+.lift-ideas .opt { flex: 0 1 auto; font-size: 14px; padding: 9px 12px; }
+.lifts { margin-top: 6px; }
+.lift-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.lift-row:last-child { border-bottom: 0; }
+.lift-row .ln b { display: block; font-weight: 600; font-size: 16px; }
+.lift-row .ln small { display: block; font-size: 12px; color: var(--muted); margin-top: 1px; line-height: 1.3; }
+.lift-row .lin { display: flex; align-items: center; gap: 6px; }
+.lift-row .lin span { font-size: 13px; color: var(--muted); white-space: nowrap; }
+.lift-row .lin input { width: 64px; min-height: 44px; border-radius: 12px; border: 1.5px solid var(--line); background: var(--surface-2); padding: 8px 8px; font-size: 16px; text-align: center; outline: 0; font-variant-numeric: tabular-nums; }
+.lift-row .lin input[data-lreps] { width: 52px; }
+.lift-row .lin input:focus { border-color: var(--ink); }
+.lift-flag { grid-column: 1 / -1; font-size: 12px; font-weight: 600; color: var(--amber-ink); }
+.lifts-prog { margin-top: 8px; }
+.lp-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.lp-row:last-child { border-bottom: 0; }
+.lp-main { flex: 1; min-width: 0; }
+.lp-main b { display: block; font-weight: 600; }
+.lp-main small { display: block; font-size: 12px; color: var(--muted); line-height: 1.35; }
+.spark { width: 84px; height: 30px; flex: 0 0 auto; }
+.spark path { fill: none; stroke: var(--ink-2); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.spark circle { fill: var(--lime-deep); stroke: var(--surface); stroke-width: 2; }
+.flag.warn { background: var(--amber-soft); color: var(--amber-ink); }
+.lp-row .flag { flex: 0 0 auto; }
+.status-line b { font-weight: 600; }
+@media (max-width: 370px) {
+  .lift-row { grid-template-columns: minmax(0, 1fr); }
+  .spark { width: 64px; }
+}
+.flag.neutral { background: var(--surface-2); color: var(--ink-2); }

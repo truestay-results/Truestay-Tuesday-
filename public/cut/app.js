@@ -371,6 +371,51 @@
   const waistBefore = (week) => (S.data.waist || []).filter((x) => x.week < week).pop() || null;
   const waistChg = (cmDiff) => chg(toUnit(cmDiff), wUnit());
 
+  // ---------- strength: one top set a week per main lift ----------
+  // Sets are compared as an estimated one-rep max (Epley: kg x (1 + reps / 30), reps capped at 12),
+  // so 100 x 6 one week and 105 x 4 the next can be compared fairly. A bodyweight lift (0 kg added) is compared on reps.
+  const LIFT_IDEAS = ["Squat", "Bench press", "Deadlift", "Overhead press", "Pull-up", "Romanian deadlift", "Hip thrust", "Barbell row", "Leg press", "Incline bench"];
+  const liveLifts = () => (S.data.lifts || []).filter((l) => l.active);
+  const setOf = (week, liftId) => (S.data.sets || []).find((x) => x.week === week && x.lift_id === liftId) || null;
+  const setsFor = (liftId) => (S.data.sets || []).filter((x) => x.lift_id === liftId).sort((a, b) => (a.week < b.week ? -1 : 1));
+  const est = (x) => (x.kg > 0 ? x.kg * (1 + Math.min(x.reps, 12) / 30) : x.reps);
+  const kgTxt = (v) => (Math.round(v * 10) / 10).toString();
+  const setTxt = (x) => (x.kg > 0 ? `${kgTxt(x.kg)} kg × ${x.reps}` : `${x.reps} reps`);
+  function liftTrend(lift) {
+    const xs = setsFor(lift.id);
+    if (!xs.length) return { n: 0, status: "none", xs };
+    const vs = xs.map(est);
+    const bw = xs.every((x) => !(x.kg > 0));
+    const base = Math.max(...vs.slice(0, 2));
+    const last = vs[vs.length - 1];
+    const pct = base ? ((last - base) / base) * 100 : 0;
+    let drops = 0;
+    for (let i = vs.length - 1; i > 0 && vs[i] < vs[i - 1] * 0.99; i--) drops++;
+    let status = "hold";
+    if (xs.length < 2) status = "new";
+    else if (pct >= 2.5) status = "up";
+    else if (pct >= -2.5) status = "hold";
+    else if (drops >= 2 && pct <= -5) status = "drop";
+    else status = "slip";
+    return { n: xs.length, xs, vs, base, last, pct, drops, status, bw, unit: bw ? "reps" : "kg" };
+  }
+  const LIFT_TAG = { new: ["Starting point", "neutral"], up: ["Up", "ok"], hold: ["Holding", "ok"], slip: ["Slipping", "warn"], drop: ["Dropping", "red"], none: ["No sets yet", "neutral"] };
+  function strength() {
+    const ts = liveLifts().map((l) => ({ l, t: liftTrend(l) }));
+    const scored = ts.filter((x) => x.t.n >= 2);
+    const avgPct = scored.length ? avg(scored.map((x) => x.t.pct)) : null;
+    const dropping = ts.filter((x) => x.t.status === "drop");
+    const warn = dropping.length > 0 || (scored.length >= 2 && avgPct <= -5);
+    let line = "";
+    if (avgPct != null) {
+      const r = Math.round(avgPct * 10) / 10;
+      const pc = `${r > 0 ? "+" : r < 0 ? "−" : ""}${Math.abs(r).toFixed(1)}%`;
+      if (dropping.length) line = `${dropping.map((x) => x.l.name).join(" and ")} ${dropping.length === 1 ? "is" : "are"} dropping · overall ${pc} on your first weeks`;
+      else line = `${r <= -5 ? "Strength is dropping" : r >= 2.5 ? "Strength is going up" : r >= -2.5 ? "Strength is holding" : "Strength is slipping a little"} · ${pc} on your first weeks`;
+    }
+    return { ts, avgPct, dropping, warn, line };
+  }
+
   // ---------- saving a day ----------
   async function saveDay(day, patch) {
     try {
@@ -470,7 +515,8 @@
 
       ${weekCard(ws, day)}
 
-      ${checkinCard(wk, shots)}`;
+      ${checkinCard(wk, shots)}
+      ${liftsCard(wk)}`;
   }
   function checkinCard(wk, shots) {
     const w = waistOf(wk);
@@ -498,6 +544,47 @@
         <span class="l"><b>${shots === 3 ? "Photos done" : `Photos · ${shots} of 3`}</b><small>${shots === 3 ? "Front, side and back are in." : "Front, side and back. Same spot, same light."}</small></span>
         <span class="chev">${ic("right")}</span>
       </button>
+    </section>`;
+  }
+  function liftsCard(wk) {
+    const lifts = liveLifts();
+    if (!lifts.length) {
+      return `<section class="card rise" style="--i:5" id="liftSetup">
+        <div class="ch"><h3>Strength check</h3><span>once a week</span></div>
+        <p class="w-sub" style="margin-top:6px">Pick your 3 or 4 main lifts. Log one top set of each a week. If your strength holds while the weight comes off, you're keeping your muscle.</p>
+        <div class="opts lift-ideas" data-name="ideas">${LIFT_IDEAS.map((n, i) => `<button type="button" class="opt${i < 4 ? " on" : ""}" data-val="${esc(n)}">${esc(n)}</button>`).join("")}</div>
+        <div class="tk-num" style="border-top:0;padding-top:0"><input id="liftOwn" autocomplete="off" maxlength="40" placeholder="Or add your own, e.g. Hack squat"></div>
+        <div class="form-err" id="liftErr"></div>
+        <button class="btn lime" style="margin-top:12px" data-action="lifts-start">Track these lifts</button>
+      </section>`;
+    }
+    const st = strength();
+    return `<section class="card rise" style="--i:5">
+      <div class="ch"><h3>Top sets this week</h3><button class="linkish" data-action="lifts-edit">Edit lifts</button></div>
+      <div class="lifts">${lifts
+        .map((l) => {
+          const cur = setOf(wk, l.id);
+          const prev = setsFor(l.id).filter((x) => x.week < wk).pop();
+          const t = liftTrend(l);
+          const note = prev ? `Last: ${setTxt(prev)} on ${shortDay(prev.day)}` : "Your heaviest working set this week";
+          let vs = "";
+          if (cur && prev) {
+            const d = est(cur) - est(prev);
+            const pc = (d / est(prev)) * 100;
+            vs = Math.abs(pc) < 0.5 ? ` · same as last time` : ` · ${pc > 0 ? "up" : "down"} ${Math.abs(pc).toFixed(1)}%`;
+          }
+          return `<div class="lift-row">
+            <div class="ln"><b>${esc(l.name)}</b><small>${esc(note)}${vs}</small></div>
+            <div class="lin">
+              <input data-lkg="${l.id}" inputmode="decimal" autocomplete="off" enterkeyhint="next" aria-label="${esc(l.name)} weight in kg" placeholder="${prev ? kgTxt(prev.kg) : "kg"}" value="${cur ? kgTxt(cur.kg) : ""}">
+              <span>kg ×</span>
+              <input data-lreps="${l.id}" inputmode="numeric" autocomplete="off" enterkeyhint="done" aria-label="${esc(l.name)} reps" placeholder="${prev ? prev.reps : "reps"}" value="${cur ? cur.reps : ""}">
+            </div>
+            ${t.status === "drop" ? `<p class="lift-flag">Down ${plural(t.drops, "week")} running</p>` : ""}
+          </div>`;
+        })
+        .join("")}</div>
+      <p class="w-sub">${st.line || "Put in your best working set: the weight and the reps. Bodyweight moves, put 0 kg."}</p>
     </section>`;
   }
   function tickCard(key, title, on, sub, num) {
@@ -605,6 +692,8 @@
       </section>
       ${(S.data.waist || []).length > 1 ? `<p class="hint" style="margin-top:8px">If the scale stalls but your waist keeps coming down, it's working. That's often muscle holding on while fat comes off.</p>` : ""}
 
+      ${strengthCard()}
+
       <div class="section-head"><h2>Weeks</h2><span>${plural(weeks.length, "week")}</span></div>
       ${weeks
         .slice()
@@ -625,6 +714,46 @@
                .join("")}</div>`
           : ""
       }`;
+  }
+  function spark(vs) {
+    if (!vs || vs.length < 2) return "";
+    const W = 84;
+    const H = 30;
+    const lo = Math.min(...vs);
+    const hi = Math.max(...vs);
+    const r = hi - lo || 1;
+    const pts = vs.map((v, i) => [(i / (vs.length - 1)) * (W - 8) + 4, H - 5 - ((v - lo) / r) * (H - 10)]);
+    const last = pts[pts.length - 1];
+    return `<svg class="spark" viewBox="0 0 ${W} ${H}" aria-hidden="true"><path d="${pts.map((p, i) => `${i ? "L" : "M"}${p[0].toFixed(1)},${p[1].toFixed(1)}`).join("")}"/><circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="4"/></svg>`;
+  }
+  function strengthCard() {
+    const lifts = liveLifts();
+    const st = strength();
+    if (!lifts.length)
+      return `<section class="card rise" style="--i:3"><div class="ch"><h3>Strength</h3></div><p class="w-sub">Pick your main lifts on Today and log one top set of each a week. Holding strength in a cut means you're holding muscle.</p></section>`;
+    return `<section class="card rise" style="--i:3">
+      <div class="ch"><h3>Strength</h3><span>top set each week</span></div>
+      ${
+        st.warn
+          ? `<div class="status-line warn" style="margin-top:10px">${ic("flag")}<span><b>${st.dropping.length ? `${st.dropping.map((x) => x.l.name).join(" and ")} ${st.dropping.length === 1 ? "has" : "have"} dropped ${st.dropping.length === 1 ? `${st.dropping[0].t.drops} weeks running` : "for a couple of weeks"}.` : "Your lifts are down more than 5% on your first weeks."}</b> In a cut that usually means the deficit's too big, protein's too low, or sleep's off. Worth a look before it costs muscle.</span></div>`
+          : ""
+      }
+      ${st.line ? `<p class="w-sub" style="margin-top:8px">${st.line}</p>` : ""}
+      <div class="lifts-prog">${st.ts
+        .map(({ l, t }) => {
+          const [tag, tone] = LIFT_TAG[t.status];
+          const last = t.xs[t.xs.length - 1];
+          const pct = t.n >= 2 ? Math.round(t.pct * 10) / 10 : null;
+          return `<div class="lp-row">
+            <div class="lp-main"><b>${esc(l.name)}</b><small>${last ? `${setTxt(last)} · ${shortDay(last.day)}` : "No sets yet"}</small>
+              <small>${t.n ? (t.bw ? "bodyweight, compared on reps" : `est. max ${kgTxt(Math.round(t.last * 2) / 2)} kg`) : ""}${pct != null ? ` · ${pct > 0 ? "+" : pct < 0 ? "−" : ""}${Math.abs(pct).toFixed(1)}% on first weeks` : ""}</small></div>
+            ${spark(t.vs)}
+            <span class="flag ${tone}">${tag}</span>
+          </div>`;
+        })
+        .join("")}</div>
+      <p class="hint" style="margin-top:10px;padding:0">Est. max is the one-rep max worked out from your top set, so 100 kg × 6 one week and 105 kg × 4 the next compare fairly. Your first two weeks are the baseline.</p>
+    </section>`;
   }
   function weekRow(x, prev) {
     const ph = phase(x.w) || { week: 0 };
@@ -798,6 +927,22 @@
       drawChart();
       drawWaist();
     }
+    $$("[data-lkg],[data-lreps]").forEach((inp) => {
+      inp.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          const next = inp.dataset.lkg ? $(`[data-lreps="${inp.dataset.lkg}"]`) : null;
+          if (next) next.focus();
+          else inp.blur();
+        }
+      });
+      inp.addEventListener("change", () => saveSet(Number(inp.dataset.lkg || inp.dataset.lreps)));
+    });
+    const ideas = $('[data-name="ideas"]');
+    if (ideas)
+      ideas.onclick = (e) => {
+        const b = e.target.closest(".opt");
+        if (b) b.classList.toggle("on");
+      };
     const wi = $("#waistIn");
     if (wi) {
       wi.addEventListener("keydown", (e) => {
@@ -886,6 +1031,113 @@
         if (ws.t.workouts && ws.workouts === ws.t.workouts) toast(`That's ${ws.workouts} of ${ws.t.workouts} this week. Target hit.`);
       }
     }
+  }
+
+  // ---------- strength ----------
+  async function saveSet(liftId) {
+    const kgI = $(`[data-lkg="${liftId}"]`);
+    const rI = $(`[data-lreps="${liftId}"]`);
+    if (!kgI || !rI) return;
+    const kg = numFrom(kgI.value);
+    const reps = numFrom(rI.value);
+    const wk = weekOf(S.day);
+    const cur = setOf(wk, liftId);
+    if (kg == null && reps == null) {
+      if (!cur) return;
+    } else if (kg == null || reps == null) return; // wait for both
+    if (cur && cur.kg === kg && cur.reps === Math.round(reps ?? 0)) return;
+    try {
+      const r = await api(`/cut/sets/${S.day}/${liftId}`, { method: "PUT", body: { kg, reps: reps == null ? null : Math.round(reps) } });
+      const focusNext = document.activeElement && document.activeElement.matches("[data-lkg],[data-lreps]") ? document.activeElement.dataset : null;
+      setData(r.state);
+      rerender();
+      if (focusNext) {
+        const sel = focusNext.lkg ? `[data-lkg="${focusNext.lkg}"]` : `[data-lreps="${focusNext.lreps}"]`;
+        const el = $(sel);
+        if (el) el.focus();
+      }
+      if (kg != null) haptic();
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function startLifts() {
+    const picked = $$('[data-name="ideas"] .opt.on').map((b) => b.dataset.val);
+    const own = $("#liftOwn").value.trim();
+    if (own) picked.push(own);
+    if (!picked.length) return ($("#liftErr").textContent = "Pick at least one lift.");
+    if (picked.length > 6) return ($("#liftErr").textContent = "Six at most. The 3 or 4 that matter most is plenty.");
+    try {
+      const r = await api("/cut/lifts", { method: "POST", body: { names: picked } });
+      setData(r.state);
+      rerender();
+      toast(`Tracking ${plural(picked.length, "lift")}. Log a top set of each this week.`);
+    } catch (e) {
+      $("#liftErr").textContent = e.message;
+    }
+  }
+  function editLifts() {
+    const lifts = liveLifts();
+    openSheet("Your lifts", `
+      <div class="form">
+        ${lifts
+          .map(
+            (l) => `<div class="tk-num" style="border-top:0;margin-top:0;padding-top:0">
+              <input data-lname="${l.id}" value="${esc(l.name)}" maxlength="40" aria-label="Lift name">
+              <button class="mini-step" data-ldel="${l.id}" aria-label="Stop tracking ${esc(l.name)}">${ic("trash")}</button>
+            </div>`
+          )
+          .join("")}
+        ${lifts.length < 6 ? `<div class="tk-num" style="border-top:0;margin-top:0;padding-top:0"><input id="lNew" maxlength="40" placeholder="Add a lift"><button class="mini-step" id="lAdd" aria-label="Add lift">${ic("plus")}</button></div>` : ""}
+        <p class="hint">Removing a lift stops it showing. Its past sets are kept, and adding the same name again brings them back.</p>
+        <div class="form-err" id="lErr"></div>
+        <button class="btn lime" id="lSave">Done</button>
+      </div>`, (sh) => {
+      const err = $("#lErr", sh);
+      const run = async (fn) => {
+        err.textContent = "";
+        try {
+          const r = await fn();
+          setData(r.state);
+          return true;
+        } catch (x) {
+          err.textContent = x.message;
+          return false;
+        }
+      };
+      $$("[data-ldel]", sh).forEach(
+        (b) =>
+          (b.onclick = async () => {
+            const l = lifts.find((x) => x.id === Number(b.dataset.ldel));
+            if (!confirm(`Stop tracking ${l.name}? Its past sets are kept.`)) return;
+            if (await run(() => api(`/cut/lifts/${l.id}`, { method: "PUT", body: { active: false } }))) {
+              rerender();
+              editLifts();
+            }
+          })
+      );
+      const add = $("#lAdd", sh);
+      if (add)
+        add.onclick = async () => {
+          const n = $("#lNew", sh).value.trim();
+          if (!n) return;
+          if (await run(() => api("/cut/lifts", { method: "POST", body: { names: [n] } }))) {
+            rerender();
+            editLifts();
+          }
+        };
+      $("#lSave", sh).onclick = async () => {
+        for (const inp of $$("[data-lname]", sh)) {
+          const l = lifts.find((x) => x.id === Number(inp.dataset.lname));
+          const n = inp.value.trim();
+          if (l && n && n !== l.name && !(await run(() => api(`/cut/lifts/${l.id}`, { method: "PUT", body: { name: n } })))) return;
+        }
+        const n = $("#lNew", sh)?.value.trim();
+        if (n && !(await run(() => api("/cut/lifts", { method: "POST", body: { names: [n] } })))) return;
+        closeSheet();
+        rerender();
+      };
+    });
   }
 
   // ---------- waist ----------
@@ -1674,6 +1926,8 @@
       return;
     }
     if (d.action === "settings") return openSettings();
+    if (d.action === "lifts-start") return startLifts();
+    if (d.action === "lifts-edit") return editLifts();
     if (d.action === "logout") {
       try {
         await api("/logout", { method: "POST", raw: true });
