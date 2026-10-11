@@ -73,3 +73,13 @@ Shan's own fat loss phase. Same sign in as Pay (email, password, Face ID). Add i
 - Numbers: 7-day average, week and month averages, change on the week before, and a rate in kg a week from a straight line through the last 4 weeks of weigh-ins (needs about a fortnight)
 - Stall spotter (`stallCheck` in `public/cut/app.js`, no server side): this week's 7-day average against the 7 days that ended two weeks ago. Under 0.25% of bodyweight lost is flat. Needs 3 weeks into the phase and 4+ weigh-ins in each window. Waits 2 weeks after any target change. Only suggests a change when calories were on target on 80%+ of logged days (10+ logged) and steps on 70%+; otherwise it says tighten up first. Suggests one change: 150 kcal fewer (100 under 2,000), never below about 20 kcal per kg, or 2,000 more steps. The Today card can be snoozed for a week; Progress always shows the status
 - Hourly cron clears photo uploads that never finished
+
+## TrueStay Timer (`/timer`)
+
+HIIT and circuit class timer. Public, no sign in, no server: setups and saved classes live on the device (localStorage, keys `tst.*`). Works offline once opened.
+
+- Front end only: `public/timer/` (`app.js`, `app.css`). TrueStay Results brand (burnt orange, off-white, charcoal, Barlow Condensed), since the class sees it
+- Setup: up to 20 stations (names, paste a list, reorder, duplicate, remove), one work time for all or per station, move time between stations, rounds, rest between rounds, get ready. Total time shown. Save, load and delete named classes
+- Running: full-screen colour per part (Work orange, Move off-white, Rest and Get ready charcoal) with the word on screen too, a clock that's sized to fit the screen (`fitClock`), the station and what's next, time left overall, pause, skip, back (back restarts the part; twice goes to the one before)
+- Timing comes from the clock (`performance.now`), and each part starts exactly when the last was due to end, so nothing drifts; if the phone sleeps it catches up quietly
+- Sound: Web Audio beeps (3, 2, 1 and on every change; `navigator.audioSession` set to playback where Safari supports it) and spoken cues with an en-GB voice (station names, "Halfway", "Ten seconds"). Screen kept awake with the Wake Lock API
