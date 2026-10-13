@@ -557,7 +557,8 @@
     if (!items.length) {
       return `${top}${uploadBanner()}
         <div class="empty"><b>${isLater ? "All sorted" : "Nothing waiting"}</b><span>${isLater ? "Everything has a client." : `New screenshots for ${esc(firstName(nameOf(cid)))} will show up here.`}</span></div>
-        ${doneBlock(cid, done)}`;
+        ${doneBlock(cid, done)}
+        ${clearBlock(cid, items.length + done.length)}`;
     }
     // averages only over the days the checks trust (or you counted); the rest are listed as left out
     const sum = R.summarize(days.map((d) => d.rec));
@@ -627,7 +628,14 @@
         })
         .join("")}
       </div>
-      ${doneBlock(cid, done)}`;
+      ${doneBlock(cid, done)}
+      ${clearBlock(cid, items.length + done.length)}`;
+  }
+  function clearBlock(cid, n) {
+    if (!n) return "";
+    const who = cid === "later" ? "Sort later" : firstName(nameOf(cid));
+    return `<button class="btn danger" style="margin-top:22px" data-action="clear-client">${ic("trash")} Clear all for ${esc(who)}</button>
+      <p class="hint" style="margin-top:8px;text-align:center">Start fresh. Anything cleared won't be counted again if it's sent again.</p>`;
   }
   function doneBlock(cid, done) {
     if (!done.length || cid === "later") return "";
@@ -679,7 +687,10 @@
       <div class="group-title">Storage</div>
       <div class="group"><div class="row"><span class="ic">${ic("image")}</span><span class="l">${plural(u.count, "screenshot")} held, ${mb(u.stored || u.bytes)} of ${mb(u.limit || 524288000)}<small${
         u.limit && u.stored > u.limit * 0.7 ? ' class="warn" style="color:var(--amber-ink)"' : ""
-      }>${u.limit && u.stored > u.limit * 0.7 ? "Getting full. Make PDFs and tap Done with these, so older ones get cleared. " : ""}Deleted ${S.data.keep.filedDays} days after they go in a PDF, and after ${S.data.keep.anyDays} days either way.</small></span></div></div>
+      }>${u.limit && u.stored > u.limit * 0.7 ? "Getting full. Make PDFs and tap Done with these, so older ones get cleared. " : ""}Deleted ${S.data.keep.filedDays} days after they go in a PDF, and after ${S.data.keep.anyDays} days either way.</small></span></div>
+        ${u.count ? `<button class="row danger" data-action="clear-all"><span class="ic">${ic("trash")}</span><span class="l">Clear everything<small>Every client's screenshots, so you start fresh. Targets stay</small></span></button>` : ""}
+        ${S.data.seen ? `<button class="row" data-action="forget-seen"><span class="ic">${ic("refresh")}</span><span class="l">Let cleared ones back in<small>${plural(S.data.seen, "screenshot")} cleared or done before. They're skipped if sent again; this lets them be added</small></span></button>` : ""}
+      </div>
       <div class="group-title">Account</div>
       <div class="group">
         <div class="row"><span class="ic">${ic("user")}</span><span class="l">${esc(S.session?.email || "")}<small>Same sign in as TrueStay Pay</small></span></div>
@@ -1001,7 +1012,7 @@
 
   async function upload(files, clientId) {
     const c = clientId ? clientOf(clientId) : null;
-    const U = (S.up = { total: files.length, done: 0, added: 0, dup: 0, failed: 0, err: "", clientName: c ? c.name : "" });
+    const U = (S.up = { total: files.length, done: 0, added: 0, dup: 0, seen: 0, failed: 0, err: "", clientName: c ? c.name : "" });
     if (S.view !== "client" || S.clientId !== (clientId ?? "later")) {
       S.view = "client";
       S.clientId = clientId ?? "later";
@@ -1016,7 +1027,8 @@
           const { blob } = await toJpeg(f, MAX_UPLOAD_W, 0.85);
           const data = await blobToB64(blob);
           const r = await api("/logs/upload", { method: "POST", body: { client_id: clientId ?? null, name: f.name || "", lm: f.lastModified || 0, data } });
-          if (r.dup) U.dup++;
+          if (r.seen) U.seen++;
+              else if (r.dup) U.dup++;
           else {
             U.added++;
             if (r.item) addItem(r.item);
@@ -1044,6 +1056,7 @@
     await refresh();
     const parts = [`${plural(U.added, "screenshot")} added`];
     if (U.dup) parts.push(`${U.dup} already there`);
+    if (U.seen) parts.push(`${U.seen} done before, skipped`);
     if (U.failed) parts.push(`${U.failed} didn't go: ${U.err}`);
     toast(parts.join(". ") + ".");
     readLoop();
@@ -1534,7 +1547,7 @@
       const onlyShots = $("#im-shots", sh).checked;
       $("#im-go", sh).hidden = true;
       $("#im-prog", sh).hidden = false;
-      const U = { total: list.length, done: 0, added: 0, dup: 0, skipped: 0, failed: 0, err: "" };
+      const U = { total: list.length, done: 0, added: 0, dup: 0, seen: 0, skipped: 0, failed: 0, err: "" };
       let i = 0;
       const one = async () => {
         while (i < list.length) {
@@ -1547,7 +1560,8 @@
               const blob = new Blob([bytes], { type: ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : ext === "heic" ? "image/heic" : "image/jpeg" });
               const { blob: jpg } = await toJpeg(blob, MAX_UPLOAD_W, 0.85);
               const r = await api("/logs/upload", { method: "POST", body: { client_id: target, name: e.base, lm: 0, data: await blobToB64(jpg) } });
-              if (r.dup) U.dup++;
+              if (r.seen) U.seen++;
+              else if (r.dup) U.dup++;
               else {
                 U.added++;
                 if (r.item) addItem(r.item);
@@ -1576,6 +1590,7 @@
       window.scrollTo(0, 0);
       const parts = [`${plural(U.added, "screenshot")} imported`];
       if (U.dup) parts.push(`${U.dup} already there`);
+    if (U.seen) parts.push(`${U.seen} done before, skipped`);
       if (U.skipped) parts.push(`${plural(U.skipped, "photo")} skipped`);
       if (U.failed) parts.push(`${U.failed} didn't go: ${U.err}`);
       toast(parts.join(". ") + ".");
@@ -1867,6 +1882,44 @@
         setData(r.state);
         rerender();
         toast(`${plural(ids.length, "screenshot")} back in the waiting list`);
+      } catch (err) {
+        fail(err);
+      }
+    } else if (act === "clear-client" || act === "clear-all") {
+      const all = act === "clear-all";
+      const cid = all ? "all" : S.clientId;
+      const n = all ? S.data.items.length : itemsFor(cid).length + itemsFor(cid, true).length;
+      const who = all ? "" : cid === "later" ? "Sort later" : firstName(nameOf(cid));
+      openSheet(all ? "Clear everything?" : `Clear all for ${who}?`, `
+        <p class="hint" style="margin-bottom:16px">${all ? `All ${plural(n, "screenshot")}, for every client,` : plural(n, "screenshot")} will go: waiting ones, ones already in PDFs, and any days you counted or left out. ${
+          all ? "Targets and the share button stay." : cid === "later" ? "" : "Their targets stay."
+        }<br><br>If any of these screenshots are sent again, they're skipped, so nothing gets counted twice. Make any PDFs you need first.</p>
+        <button class="btn danger" id="clrGo" style="background:var(--red-ink);color:#fff;border:0">${ic("trash")} Clear ${plural(n, "screenshot")}</button>
+        <button class="btn ghost" data-close style="margin-top:10px">Cancel</button>`, (sh) => {
+        const go = $("#clrGo", sh);
+        go.onclick = async () => {
+          go.disabled = true;
+          try {
+            const r = await api("/logs/clear", { method: "POST", body: { client_id: cid } });
+            closeSheet();
+            setData(r.state);
+            S.sel = null;
+            if (all) S.view = "home";
+            rerender();
+            toast(`${plural(r.cleared, "screenshot")} cleared. Ready for new ones.`);
+          } catch (err) {
+            go.disabled = false;
+            fail(err);
+          }
+        };
+      });
+    } else if (act === "forget-seen") {
+      if (!confirm(`Let ${plural(S.data.seen, "cleared screenshot")} be added again? Anything sent again after this is counted as new.`)) return;
+      try {
+        const r = await api("/logs/seen", { method: "DELETE" });
+        setData(r.state);
+        rerender();
+        toast("Done. Cleared screenshots can be added again.");
       } catch (err) {
         fail(err);
       }

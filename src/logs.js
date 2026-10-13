@@ -124,6 +124,9 @@ export async function ensureLogsSchema(db) {
     db.prepare(
       "CREATE TABLE IF NOT EXISTS logs_days (client_id INTEGER NOT NULL, day TEXT NOT NULL, verdict TEXT NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY (client_id, day))"
     ),
+    // fingerprints of screenshots that were cleared (or tidied away after their PDF), so the same picture
+    // sent again (a re-exported WhatsApp chat, say) is skipped instead of counted twice
+    db.prepare("CREATE TABLE IF NOT EXISTS logs_seen (sha TEXT PRIMARY KEY, client_id INTEGER, cleared_at INTEGER NOT NULL)"),
   ]);
   // added later: which reader version read it (old ones get read again), and, for numbers you typed,
   // whether they're the whole day's or one meal's
@@ -263,6 +266,7 @@ export async function storeImage(env, { bytes, b64, clientId, clientName, source
   sha = await sha256hex(bytes || fromB64(b64)); // always the picture's bytes, so the same file matches however it came in
   const dup = await db.prepare("SELECT id, filed_at FROM logs_items WHERE sha = ? AND status != 'uploading' LIMIT 1").bind(sha).first();
   if (dup) return { id: dup.id, dup: true, filed: !!dup.filed_at };
+  if (await db.prepare("SELECT 1 FROM logs_seen WHERE sha = ?").bind(sha).first()) return { id: null, dup: true, seen: true };
   if (bytes) b64 = toB64(bytes);
 
   const now = nowS();
@@ -529,13 +533,14 @@ function newKey() {
 async function getState(env) {
   const db = env.LOGS_DB;
   const cutoff = nowS() - KEEP_FILED_DAYS * 86400;
-  const [items, targets, usage, key, clients, verdicts] = await Promise.all([
+  const [items, targets, usage, key, clients, verdicts, seen] = await Promise.all([
     db.prepare("SELECT * FROM logs_items WHERE status NOT IN ('uploading','dup') AND (filed_at IS NULL OR filed_at > ?) ORDER BY received_at, id").bind(cutoff).all(),
     db.prepare("SELECT * FROM logs_targets").all(),
     db.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(bytes),0) AS bytes FROM logs_items WHERE status != 'dup'").first(),
     getKey(db),
     clientsFromPay(env),
     db.prepare("SELECT client_id, day, verdict FROM logs_days").all(),
+    db.prepare("SELECT COUNT(*) AS n FROM logs_seen").first(),
   ]);
   const t = {};
   for (const r of targets.results) t[r.client_id] = { kcal: r.kcal, protein: r.protein, steps: r.steps };
@@ -550,6 +555,7 @@ async function getState(env) {
     key,
     usage: { count: usage.n, bytes: usage.bytes, stored: Math.round(usage.bytes * 1.34), limit: DB_LIMIT },
     keep: { filedDays: KEEP_FILED_DAYS, anyDays: KEEP_ANY_DAYS },
+    seen: seen ? seen.n : 0,
     now: nowS(),
   };
 }
@@ -611,7 +617,7 @@ export async function handleLogsApp(req, env, url, path, ctx) {
     const c = await clientRef(env, b.client_id);
     const res = await storeImage(env, { b64: b.data, clientId: c.id, clientName: c.name, source: "app", name: b.name, lastModified: b.lm });
     if (!res.dup && ctx && ctx.waitUntil) ctx.waitUntil(readItem(env, res.id).catch(() => {}));
-    return json({ ok: true, dup: res.dup, item: await itemById(db, res.id) });
+    return json({ ok: true, dup: res.dup, seen: !!res.seen, item: res.id ? await itemById(db, res.id) : null });
   }
 
   if ((m = path.match(/^\/read\/(\d+)$/)) && method === "POST") {
@@ -750,6 +756,44 @@ export async function handleLogsApp(req, env, url, path, ctx) {
     return json({ ok: true, state: await getState(env) });
   }
 
+  // Clear out one client (or Sort later, or everything): their screenshots and day calls go, targets stay.
+  // Each picture's fingerprint is kept, so sending the same screenshot again doesn't bring it back.
+  if (path === "/clear" && method === "POST") {
+    const b = await body();
+    const now = nowS();
+    let where;
+    let binds;
+    let days = null;
+    if (b.client_id === "all") {
+      where = "status != 'uploading'";
+      binds = [];
+      days = db.prepare("DELETE FROM logs_days");
+    } else if (b.client_id === "later") {
+      where = "client_id IS NULL AND status != 'uploading'";
+      binds = [];
+    } else {
+      const id = idOf(b.client_id);
+      where = "client_id = ? AND status != 'uploading'";
+      binds = [id];
+      days = db.prepare("DELETE FROM logs_days WHERE client_id = ?").bind(id);
+    }
+    const n = await db.prepare(`SELECT COUNT(*) AS n FROM logs_items WHERE ${where}`).bind(...binds).first();
+    const stmts = [
+      db.prepare(`INSERT OR IGNORE INTO logs_seen (sha, client_id, cleared_at) SELECT sha, client_id, ? FROM logs_items WHERE ${where}`).bind(now, ...binds),
+      db.prepare(`DELETE FROM logs_blobs WHERE item_id IN (SELECT id FROM logs_items WHERE ${where})`).bind(...binds),
+      db.prepare(`DELETE FROM logs_items WHERE ${where}`).bind(...binds),
+    ];
+    if (days) stmts.push(days);
+    await db.batch(stmts);
+    return json({ ok: true, cleared: n ? n.n : 0, state: await getState(env) });
+  }
+
+  // let cleared screenshots be added again
+  if (path === "/seen" && method === "DELETE") {
+    await db.prepare("DELETE FROM logs_seen").run();
+    return json({ ok: true, state: await getState(env) });
+  }
+
   if (path === "/key" && method === "POST") {
     const key = newKey();
     await db
@@ -865,10 +909,13 @@ export async function logsCron(env, ctx) {
     const chunk = ids.slice(i, i + 50);
     const ph = chunk.map(() => "?").join(",");
     await db.batch([
+      // ones that made it into a PDF are remembered, so they aren't counted again if sent again
+      db.prepare(`INSERT OR IGNORE INTO logs_seen (sha, client_id, cleared_at) SELECT sha, client_id, ? FROM logs_items WHERE id IN (${ph}) AND filed_at IS NOT NULL AND status NOT IN ('uploading','dup')`).bind(now, ...chunk),
       db.prepare(`DELETE FROM logs_blobs WHERE item_id IN (${ph})`).bind(...chunk),
       db.prepare(`DELETE FROM logs_items WHERE id IN (${ph})`).bind(...chunk),
     ]);
   }
+  await db.prepare("DELETE FROM logs_seen WHERE cleared_at < ?").bind(now - 400 * 86400).run();
   if (!env.AI) return;
   // anything not read yet, then anything read by an older version of the reader (newest first, so this week's are fixed first)
   const todo = await db
