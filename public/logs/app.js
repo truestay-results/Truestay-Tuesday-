@@ -74,6 +74,7 @@
   // ---------- icons ----------
   const P = {
     plus: '<path d="M12 5v14M5 12h14"/>',
+    paste: '<path d="M9 4h6v3H9z"/><path d="M15 5h2a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2"/><path d="M9 13h6M9 17h4"/>',
     check: '<path d="m5 12.5 4.5 4.5L19 7.5"/>',
     left: '<path d="m15 18-6-6 6-6"/>',
     right: '<path d="m9 18 6-6-6-6"/>',
@@ -1278,6 +1279,8 @@
     openSheet(
       "Add screenshots",
       `<div class="action-list">
+        <button class="action" data-src="paste"><span class="ic">${ic("paste")}</span><span><b>Paste</b><small>Copied screenshots from Photos or WhatsApp. One or lots.</small></span></button>
+        <div id="pasteBox" class="paste-box" contenteditable="true" role="textbox" aria-label="Paste screenshots here" inputmode="none" hidden>Tap and hold here, then tap Paste</div>
         <button class="action" data-src="photos"><span class="ic">${ic("image")}</span><span><b>Pick from Photos</b><small>Screenshots saved on your phone. Pick as many as you like.</small></span></button>
         <button class="action" data-src="chat"><span class="ic">${ic("inbox")}</span><span><b>Import a WhatsApp chat</b><small>Every screenshot a client sent, each on the day it was sent. Best for catching up.</small></span></button>
       </div>`,
@@ -1285,6 +1288,7 @@
         sh.querySelector(".action-list").onclick = (ev) => {
           const b = ev.target.closest("[data-src]");
           if (!b) return;
+          if (b.dataset.src === "paste") return pasteFromClipboard(clientId, sh);
           if (b.dataset.src === "photos") {
             closeSheet(true);
             startAdd(clientId);
@@ -1293,6 +1297,61 @@
       }
     );
   }
+
+  // ---------- pasting ----------
+  // Copy screenshots in Photos or WhatsApp, then Paste here. Safari asks with its own small Paste bubble.
+  // If reading the clipboard isn't allowed, a box appears to tap and hold and paste into instead.
+  const imgFiles = (list) =>
+    [...(list || [])].filter((f) => f && /^image\//.test(f.type)).map((f, i) => (f.name && f.name !== "image.png" ? f : new File([f], `pasted-${i + 1}.${(f.type.split("/")[1] || "png").replace("jpeg", "jpg")}`, { type: f.type })));
+  function gotPasted(files, clientId) {
+    if (!files.length) {
+      toast("Nothing to paste. Copy the screenshots first (tap Share, Copy), then try again.");
+      return;
+    }
+    closeSheet(true);
+    if (clientId !== undefined) return upload(files, clientId);
+    pickClient(`Who ${files.length === 1 ? "is this" : `are these ${files.length}`} for?`, (cid) => upload(files, cid));
+  }
+  async function pasteFromClipboard(clientId, sh) {
+    const box = sh && $("#pasteBox", sh);
+    const showBox = () => {
+      if (!box) return toast("Copy the screenshots, then paste them here.");
+      box.hidden = false;
+      box.textContent = "Tap and hold here, then tap Paste";
+      box.onpaste = (e) => {
+        e.preventDefault();
+        gotPasted(imgFiles(e.clipboardData && e.clipboardData.files), clientId);
+      };
+      box.oninput = () => (box.textContent = "Tap and hold here, then tap Paste");
+      box.focus();
+    };
+    if (!navigator.clipboard || !navigator.clipboard.read) return showBox();
+    try {
+      const items = await navigator.clipboard.read();
+      const files = [];
+      for (const it of items) {
+        const t = it.types.find((x) => /^image\//.test(x));
+        if (t) files.push(await it.getType(t));
+      }
+      if (!files.length) {
+        toast("No screenshots copied. In Photos, select them, tap Share, then Copy.");
+        return;
+      }
+      gotPasted(imgFiles(files.map((b) => new File([b], "", { type: b.type }))), clientId);
+    } catch (e) {
+      showBox();
+    }
+  }
+  // pasting anywhere in the app (not into a text box) adds them too
+  document.addEventListener("paste", (e) => {
+    if (!S.data || S.locked || e.defaultPrevented) return;
+    const t = e.target;
+    if (t && (t.id === "pasteBox" || /^(INPUT|TEXTAREA)$/.test(t.tagName) || t.isContentEditable)) return;
+    const files = imgFiles(e.clipboardData && e.clipboardData.files);
+    if (!files.length) return;
+    e.preventDefault();
+    gotPasted(files, S.view === "client" ? (S.clientId === "later" ? null : S.clientId) : undefined);
+  });
 
   // ---------- WhatsApp chat export (.zip) ----------
   // WhatsApp's Export Chat names each picture with when it was sent, e.g. 00000045-PHOTO-2026-09-21-21-34-12.jpg,

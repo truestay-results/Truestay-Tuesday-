@@ -370,3 +370,7 @@ details.manual .steps { padding: 4px 14px 16px; }
 .banner.warn { background: var(--amber-soft); color: var(--amber-ink); border-color: transparent; }
 .banner.warn svg { width: 18px; height: 18px; flex: 0 0 auto; }
 .stats small.warn { color: #F5BD55; } /* the hero card is dark in both themes */
+
+.paste-box { margin: 2px 0 10px; min-height: 96px; border: 2px dashed var(--line-2); border-radius: 18px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 16px; font-size: 16px; color: var(--ink-2, var(--ink)); -webkit-user-select: text; user-select: text; caret-color: transparent; }
+.paste-box[hidden] { display: none; }
+.paste-box:focus { outline: none; border-color: var(--lime); }

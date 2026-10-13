@@ -36,6 +36,7 @@ Clients' nightly food and step screenshots, read automatically and sorted into o
 - Getting screenshots in:
   - WhatsApp share button: an iPhone Shortcut, set up once from the steps in the app. Works for 1 or 50 at a time
   - Add screenshots: pick from Photos (resized on the phone before upload)
+  - Paste (first option under Add screenshots): copy screenshots in Photos or WhatsApp and paste. Reads the clipboard (Safari shows its Paste bubble); if that isn't allowed, a box appears to tap and hold and paste into. Pasting anywhere in the app works too. Pasted pictures carry no date, so they land in Needs a day
   - Import a WhatsApp chat: the Export Chat zip is opened on the phone, and each picture keeps the date and time it was sent
 - Reading (reader version 2, `src/logs-read.js`): Workers AI (binding `AI`), vision models listed at the top of `src/logs.js`. The model says what each number IS, not just what it is:
   - the kind of screen: a whole-day total, one meal, part of a diary, one food, steps, weight, or a summary of several days (never used for a day)
