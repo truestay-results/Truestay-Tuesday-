@@ -225,6 +225,7 @@
   function planPrice(p) {
     if (!p || p.kind === "break") return "";
     if (p.billing === "monthly") return `${money(p.price_pence)}/month`;
+    if (p.billing === "upfront" && p.kind !== "programme" && p.end_date) return `${money(p.price_pence)} paid ahead · ${plural(Math.max(1, Math.round((daysBetween(p.start_date, p.end_date) + 1) / 30.44)), "month")}`;
     if (p.billing === "upfront") return `${money(p.price_pence)} upfront`;
     if (p.billing === "split") return `${money(p.price_pence)} in ${p.instalments} payments`;
     return p.price_pence ? `Pays as they go · usually ${money(p.price_pence)}` : "Pays as they go";
@@ -1205,6 +1206,7 @@
       <div class="quick rise" style="--i:2">
         <button class="btn lime" data-change-plan="${c.id}">${ic("swap")} Change plan</button>
         <button class="btn ghost" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add payment</button>
+        ${canPayAhead(cp) ? `<button class="btn ghost wide" data-action="pay-ahead" data-client="${c.id}">${ic("coins")} Pay a few months ahead</button>` : ""}
       </div>
       <div class="tiles" style="grid-template-columns:1fr 1fr">
         <button class="tile red rise${owes.length ? " has" : ""}" style="--i:3" ${owes.length ? `data-chase-client="${c.id}"` : "disabled"}><div class="k">Late</div><div class="v">${count("c-owe-" + c.id, sum(owes))}</div><div class="s">${owes.length ? '<span class="live"></span>' + plural(owes.length, "payment") + " · chase" : "All square"}</div></button>
@@ -2358,6 +2360,7 @@
               ${act("paid-other", "cal", "Paid on another day", "")}
               ${act("chase", "chat", "Chase", "WhatsApp or text, message ready to send")}
               ${act("skip", "pause", "Skip this payment", "They're not paying this one. Counts as money lost")}
+              ${plan && plan.id === curPlan(p.client_id)?.id && canPayAhead(plan) ? act("ahead", "coins", "Pay a few months ahead", "One payment for several months, with a discount if you like") : ""}
               ${act("edit", "edit", "Edit details", "Amount, due date, method, notes")}
             </div>`
       }
@@ -2413,6 +2416,10 @@
         if (k === "date") return paidDateSheet(cur.id);
         if (k === "chase") return chaseSheet([cur]);
         if (k === "skip") return skipSheet(cur);
+        if (k === "ahead") {
+          const c = client(cur.client_id);
+          return c && payAheadSheet(c);
+        }
         if (k === "edit") return paymentSheet(cur);
       });
     });
@@ -2991,6 +2998,139 @@
     });
   }
 
+  // ---------- pay ahead: a few months in one go, often with a bit off ----------
+  // Saved as an upfront plan covering exactly those months, then back to their monthly plan on its own.
+  const canPayAhead = (cp) => cp && cp.billing === "monthly" && (cp.kind === "pt" || cp.kind === "coaching") && cp.price_pence > 0;
+  function payAheadSheet(c) {
+    const cp = curPlan(c.id);
+    if (!canPayAhead(cp)) return toast(`${firstName(c.name)} isn't on a monthly plan right now.`);
+    const today = londonToday();
+    const day = cp.day_of_month || Number(today.slice(8, 10));
+    const nextDue = S.data.payments
+      .filter((x) => x.plan_id === cp.id && !x.paid_date && x.due_date >= today)
+      .sort((a, b) => (a.due_date < b.due_date ? -1 : 1))[0];
+    const F = { months: "4", mode: "pct", off: "10", from: nextDue ? nextDue.due_date : nextOnDay(day, today), due: today };
+    const who = firstName(c.name);
+    const calc = () => {
+      const months = Number(F.months);
+      const monthly = cp.price_pence;
+      const full = monthly * months;
+      let off = 0;
+      if (F.mode === "pct") {
+        const pct = Number(String(F.off).replace(",", "."));
+        off = Number.isFinite(pct) && pct > 0 && pct < 100 ? Math.round((full * pct) / 100 / 100) * 100 : 0;
+      } else if (F.mode === "gbp") {
+        off = parseMoney(F.off) || 0;
+      }
+      off = Math.min(off, full - 100);
+      const from = F.from;
+      const end = from ? addDays(occurrence(addMonths(mKey(from), months), Number(from.slice(8, 10))), -1) : null;
+      const back = end ? nextOnDay(day, addDays(end, 1)) : null;
+      return { months, monthly, full, off, total: full - off, from, end, back };
+    };
+    const summary = () => {
+      const k = calc();
+      if (!k.from || !F.due) return `<p class="hint">Pick the dates.</p>`;
+      const offLine = k.off ? `<li><span>${F.mode === "pct" ? `${esc(String(F.off).trim())}% off` : "Discount"}</span><b class="num">−${money(k.off)}</b></li>` : "";
+      return `<ul class="ahead-sum">
+          <li><span>${k.months} months at ${money(k.monthly)}</span><b class="num">${money(k.full)}</b></li>
+          ${offLine}
+          <li class="tot"><span>${esc(who)} pays</span><b class="num">${money(k.total)}</b></li>
+        </ul>
+        <p class="hint">Due ${fmtShort(F.due)}, works out at ${money(Math.round(k.total / k.months))} a month. Covers ${fmtShort(k.from)} to ${fmtShort(k.end)}: the monthly payments in between come off, and ${money(k.monthly)} a month starts again on ${fmtShort(k.back)}.</p>`;
+    };
+    const html = `
+      <form class="form" id="paForm" novalidate>
+        <p class="hint">${esc(who)} pays for a few months in one go. Shows as owed until you mark it paid.</p>
+        <div class="field"><span class="lab">How many months</span>${opts("months", { 2: "2", 3: "3", 4: "4", 6: "6", 12: "12" }, F.months)}</div>
+        <div class="field"><span class="lab">Discount</span>${opts("mode", { pct: "% off", gbp: "£ off", none: "None" }, F.mode)}</div>
+        <div class="field" id="pa-off-f"><label for="pa-off" id="pa-off-l">Percent off</label><div class="money" id="pa-off-box"><span id="pa-off-sym">%</span><input id="pa-off" inputmode="decimal" autocomplete="off" value="${esc(F.off)}"></div></div>
+        <div class="two">
+          <div class="field"><label for="pa-from">Covers from</label><input id="pa-from" type="date" value="${F.from}"></div>
+          <div class="field"><label for="pa-due">${esc(who)} pays on</label><input id="pa-due" type="date" value="${F.due}"></div>
+        </div>
+        <div id="pa-sum">${summary()}</div>
+        <div class="form-err" id="pa-err"></div>
+        <button class="btn lime" type="submit" id="pa-go">Set up · ${money(calc().total)}</button>
+      </form>`;
+    openSheet(`Pay ahead · ${c.name}`, html, (sh) => {
+      const redraw = () => {
+        $("#pa-sum", sh).innerHTML = summary();
+        $("#pa-go", sh).textContent = `Set up · ${money(calc().total)}`;
+        const none = F.mode === "none";
+        $("#pa-off-f", sh).hidden = none;
+        $("#pa-off-l", sh).textContent = F.mode === "pct" ? "Percent off" : "Pounds off";
+        $("#pa-off-sym", sh).textContent = F.mode === "pct" ? "%" : "£";
+        $("#pa-off-box", sh).classList.toggle("pct", F.mode === "pct");
+      };
+      $('[data-name="months"]', sh).addEventListener("change", (e) => {
+        F.months = e.currentTarget.dataset.value;
+        redraw();
+      });
+      $('[data-name="mode"]', sh).addEventListener("change", (e) => {
+        const was = F.mode;
+        F.mode = e.currentTarget.dataset.value;
+        if (was !== F.mode && F.mode !== "none") {
+          F.off = F.mode === "pct" ? "10" : "";
+          $("#pa-off", sh).value = F.off;
+        }
+        redraw();
+      });
+      $("#pa-off", sh).addEventListener("input", (e) => {
+        F.off = e.target.value;
+        redraw();
+      });
+      $("#pa-from", sh).addEventListener("input", (e) => {
+        F.from = e.target.value;
+        redraw();
+      });
+      $("#pa-due", sh).addEventListener("input", (e) => {
+        F.due = e.target.value;
+        redraw();
+      });
+      $("#paForm", sh).onsubmit = async (e) => {
+        e.preventDefault();
+        const err = $("#pa-err", sh);
+        err.textContent = "";
+        const k = calc();
+        if (!k.from) return (err.textContent = "Pick the first day it covers.");
+        if (!F.due) return (err.textContent = `Pick when ${who} is paying.`);
+        if (k.from < cp.start_date) return (err.textContent = `That's before ${who}'s current plan started.`);
+        if (F.mode === "gbp" && String(F.off).trim() && parseMoney(F.off) == null) return (err.textContent = "Enter the discount in pounds, e.g. 50.");
+        const btn = $("#pa-go", sh);
+        btn.disabled = true;
+        const offNote = k.off ? (F.mode === "pct" ? `, ${String(F.off).trim()}% off (${money(k.off)})` : `, ${money(k.off)} off`) : "";
+        const plan = {
+          kind: cp.kind,
+          billing: "upfront",
+          price_pence: k.total,
+          programme_weeks: null,
+          instalments: null,
+          method: "manual",
+          start_date: k.from,
+          first_due: F.due,
+          end_date: k.end,
+          hours_per_month: cp.hours_per_month,
+          sessions_per_week: cp.sessions_per_week,
+          session_minutes: cp.session_minutes,
+          notes: `Paid ${k.months} months ahead${offNote}. Usually ${money(k.monthly)} a month.`,
+        };
+        try {
+          const r = await api(`/clients/${c.id}/plan`, { method: "POST", body: { plan, then: { mode: "resume" } } });
+          setData(r.data);
+          closeSheet();
+          haptic();
+          rerender();
+          toast(`${who} pays ${money(k.total)} for ${k.months} months · back to monthly ${fmtShort(k.back)}`);
+        } catch (e2) {
+          btn.disabled = false;
+          if (!e2.silent) err.textContent = e2.message;
+        }
+      };
+      redraw();
+    });
+  }
+
   // ---------- fix a plan in place ----------
   function editPlanSheet(p) {
     const c = client(p.client_id);
@@ -3501,6 +3641,10 @@
           }
           case "chase-list":
             return chaseSheet();
+          case "pay-ahead": {
+            const c = client(Number(d.client));
+            return c && payAheadSheet(c);
+          }
           case "owed-more":
             S.owedAll = !S.owedAll;
             return rerender();
