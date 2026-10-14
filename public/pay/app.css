@@ -1119,4 +1119,5 @@ button.tile:disabled:active { transform: none; }
 /* client page buttons fit a 360px phone */
 .quick { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
 @media (max-width: 380px) { .quick .btn { font-size: 15px; padding: 0 10px; gap: 6px; } .quick .btn svg { width: 17px; height: 17px; } }
-.money.pct span { order: 2; }
+.money.pct span { left: auto; right: 15px; }
+.field .money.pct input { padding-left: 15px; padding-right: 32px; }
