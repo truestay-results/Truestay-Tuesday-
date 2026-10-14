@@ -85,3 +85,12 @@ HIIT and circuit class timer. Public, no sign in, no server: setups and saved cl
 - Running: full-screen colour per part (Work orange, Move off-white, Rest and Get ready charcoal) with the word on screen too, a clock that's sized to fit the screen (`fitClock`), the station and what's next, time left overall, pause, skip, back (back restarts the part; twice goes to the one before)
 - Timing comes from the clock (`performance.now`), and each part starts exactly when the last was due to end, so nothing drifts; if the phone sleeps it catches up quietly
 - Sound: Web Audio beeps (3, 2, 1 and on every change; `navigator.audioSession` set to playback where Safari supports it) and spoken cues with an en-GB voice (station names, "Halfway", "Ten seconds"). Screen kept awake with the Wake Lock API
+
+## TrueStay Results coaching page (`/coaching`)
+
+Public sales page for Shan's coaching, shared as truestaytuesday.com/coaching. One file: `public/coaching/index.html` (styles and script inline), photos in `public/coaching/img/`, link preview `public/coaching/share.jpg`.
+
+- Order: hero (Lose the weight. Get strong. Keep it off.), Hi I'm Shan, Proper strength training (poster and photos with coaching cues), All in one plan, How it starts, plans and prices (picker with a month calendar), programme on its own (6, 12, 16 weeks), free session (waving cartoon), questions, last call
+- Every button opens WhatsApp to 07401 738819 with a message filled in (`data-wa`); the plan picker changes its button's message. On phones a booking bar sits at the bottom unless the hero's or the last call's button is fully on screen
+- Look: Anton statements split by short orange rules (from Shan's own poster), Archivo for text, charcoal #1A1A1A, off-white #F2EDE4, orange #E0712F on charcoal and the brand #C45A1E on off-white. Copy has no dashes or hyphens
+- Photos all share one colour grade (`tools/grade.py`): each photo's colour cast and exposure are evened out first, then the same look goes on top (clean charcoal shadows, warm cream highlights, gym blues calmed, skin kept warm). For a new photo: `python3 tools/grade.py photo.jpg public/coaching/img/name --crop x0 y0 x1 y1` (needs numpy and Pillow); use `--look-only` for graphics and cartoons
