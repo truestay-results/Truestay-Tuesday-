@@ -11,7 +11,7 @@
   const METH = { manual: "Manual", dd: "Direct debit" };
   const METH_LONG = { manual: "Manual payment", dd: "Direct debit" };
   const CST = { active: "Active", paused: "Paused", finished: "Finished" };
-  const STL = { paid: "Paid", unpaid: "Unpaid", overdue: "Overdue" };
+  const STL = { paid: "Paid", unpaid: "Unpaid", overdue: "Late" };
   const BILL = { monthly: "Monthly", upfront: "Upfront", split: "Split", none: "As they go" };
   const WEEKS = [4, 8, 12, 16];
   const LOCKS = [
@@ -147,6 +147,7 @@
     target: '<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="5"/><circle cx="12" cy="12" r="1"/>',
     clock: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
     swap: '<path d="M4 8h13l-3-3M20 16H7l3 3"/>',
+    undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
     pause: '<rect x="6" y="5" width="4" height="14" rx="1.5"/><rect x="14" y="5" width="4" height="14" rx="1.5"/>',
     flag: '<path d="M5 21V4h11l-2 4 2 4H5"/>',
     coins: '<ellipse cx="9" cy="7" rx="6" ry="3"/><path d="M3 7v5c0 1.7 2.7 3 6 3s6-1.3 6-3V7"/><path d="M9 15v2c0 1.7 2.7 3 6 3s6-1.3 6-3v-5c0-1.6-2.4-2.9-5.5-3"/>',
@@ -175,8 +176,6 @@
     heroAnim: "",
     scope: "month",
     q: "",
-    fStatus: "all",
-    fPkg: "all",
     listMode: pref("listMode", "list"),
     cStatus: "active",
     cq: "",
@@ -735,7 +734,7 @@
   function pill(p) {
     const st = stOf(p);
     if (st === "paid") return `<span class="pill paid">Paid ${fmtDay(p.paid_date)}</span>`;
-    if (st === "overdue") return `<span class="pill overdue">Overdue · ${daysBetween(p.due_date, londonToday())}d</span>`;
+    if (st === "overdue") return `<span class="pill overdue">Late · ${daysBetween(p.due_date, londonToday())}d</span>`;
     return `<span class="pill unpaid">Unpaid</span>`;
   }
   const chasedNote = (p) => (p.chase_count && !p.paid_date ? `<span class="chased">${ic("chat")} Chased ${p.chase_count > 1 ? p.chase_count + "× · " : ""}${ago(p.chased_at)}</span>` : "");
@@ -827,7 +826,11 @@
     const maxBar = Math.max(1, ...range.map((k) => sum(S.data.payments.filter((p) => mKey(p.due_date) === k)) + (all ? incomeStats(k).dueSum : 0)));
     const idx = range.indexOf(mk);
     const pct = st.dueSum ? Math.round((st.collected / st.dueSum) * 100) : 0;
-    const older = st.overdue.filter((p) => mKey(p.due_date) < mk);
+    // late = due in this month, before today, still not in
+    const lateSum = sum(st0.unpaid.filter((p) => p.due_date < today)) + (all ? sum(ist.unpaid.filter((e) => e.due_date < today)) : 0);
+    // what actually landed in this month by paid date, and how much of that was due in an earlier month
+    const landed = st.receivedSum;
+    const earlier = sum(st0.received.filter((p) => mKey(p.due_date) < mk)) + (all ? sum(ist.received.filter((e) => mKey(e.due_date) < mk)) : 0);
     const noClients = !S.data.clients.length;
     const showFace = S.platformAuth && !S.session.hasPasskey && pref("hideFace", "0") !== "1";
     const decs = decisions();
@@ -835,7 +838,7 @@
     return `
       ${topbar(`<span class="coin-logo spin">£</span>`, `<a class="round" href="${API}/export?type=payments" aria-label="Export payments CSV">${ic("download")}</a>${settingsBtn()}`)}
       <h1 class="hello rise" style="--i:0">${greet}${name}. <em>Here's what's</em> coming in.</h1>
-      ${noClients ? "" : todayCard()}
+      ${noClients ? "" : owedCard()}
       ${decs.map((d, i) => decisionCard(d, i + 1)).join("")}
 
       <div class="monthbar rise" style="--i:1">
@@ -869,40 +872,27 @@
         <div class="k"><span>Due in ${mName(mk)}</span><button class="rev-toggle${all ? " on" : ""}" data-action="all-rev" aria-pressed="${all}">${all ? ic("check") + " " : ""}All revenue</button></div>
         <div class="big">${count("due", st.dueSum, "big")}</div>
         <div class="sub">${
-          all
-            ? `${money(st0.dueSum)} from clients · ${money(ist.dueSum)} other income · ${money(st.collected)} of it in`
-            : `${plural(st.due.length, "payment")} scheduled · ${money(st.collected)} of it paid`
+          all ? `${money(st0.dueSum)} from clients · ${money(ist.dueSum)} other income` : plural(st.due.length, "payment")
         }</div>
-        <div class="progress" role="img" aria-label="${pct}% of this month's payments collected">
+        <div class="progress" role="img" aria-label="${pct}% of it in">
           <div class="fill" data-pct="${pct}" style="width:${S.counts.pct ?? 0}%"><span class="knob">${count("pct", pct, "pct")}</span></div>
         </div>
-        <div class="progress-legend"><span>Collected ${money(st.collected)}</span><span>Left ${money(st.unpaidSum)}</span></div>
+        <div class="money-line">
+          <div><span>In</span><b class="num">${money(st.collected)}</b></div>
+          <div><span>Not in yet</span><b class="num">${money(st.unpaidSum)}</b></div>
+          ${lateSum ? `<div class="late"><span>Of that, late</span><b class="num">${money(lateSum)}</b></div>` : ""}
+        </div>
+        ${
+          landed !== st.collected
+            ? `<button class="landed-line" data-scope="received">${money(landed)} landed in ${mName(mk)}${earlier ? ` · ${money(earlier)} of it due earlier` : ""} ${ic("arrow")}</button>`
+            : ""
+        }
         ${(() => {
           const lost = mk <= cur ? lostIn([mk]) : sum(skipsOf(null).filter((x) => mKey(x.due_date) === mk));
           return lost ? `<button class="lost-line" data-tab="growth">Lost ${money(lost)} to breaks and skipped payments ${ic("arrow")}</button>` : "";
         })()}
       </section>
 
-      <div class="tiles">
-        <button class="tile lime wide rise" style="--i:3" data-scope="received" id="recvTile">
-          <span class="arrow">${ic("arrow")}</span>
-          <div class="k">Received in ${mName(mk)}</div>
-          <div class="v">${count("recv", st.receivedSum, "big")}</div>
-          <div class="s">${all ? `${money(st0.receivedSum)} clients · ${money(ist.receivedSum)} other` : `${plural(st.received.length, "payment")} actually landed, by paid date`}</div>
-        </button>
-        <button class="tile rise" style="--i:4" data-scope="month" data-status="notpaid">
-          <span class="arrow">${ic("arrow")}</span>
-          <div class="k">Still unpaid</div>
-          <div class="v">${count("unpaid", st.unpaidSum)}</div>
-          <div class="s">${plural(st.unpaid.length + (all ? ist.unpaid.length : 0), all ? "item" : "payment")} due in ${mShort(mk)}</div>
-        </button>
-        <button class="tile red rise${st.overdueSum ? " has" : ""}" style="--i:5" data-action="chase-list">
-          <span class="arrow">${ic("chat")}</span>
-          <div class="k">Overdue now</div>
-          <div class="v">${count("overdue", st.overdueSum)}</div>
-          <div class="s">${st.overdue.length ? '<span class="live"></span>' + plural(st.overdue.length, "payment") + " · tap to chase" : "0 payments, all months"}${all && ist.overdue.length ? ` · ${ist.overdue.length} other late` : ""}</div>
-        </button>
-      </div>
       ${
         all
           ? `<div class="section-head"><h2 class="sm">Other income in ${mName(mk)}</h2><button class="linkish" data-tab="income">See all</button></div>
@@ -911,11 +901,6 @@
       }
       ${mk === mKey(TRACK_START) ? `<p class="note">${ic("info")}<span>Tracking started on 28 September 2026, so September only includes payments from then on.</span></p>` : ""}
       ${mk > cur ? `<p class="note">${ic("info")}<span>Only shows payments already on the books. Monthly plans add theirs about a month ahead.</span></p>` : ""}
-      ${
-        older.length && S.scope === "month"
-          ? `<button class="banner" data-action="chase-list"><span class="dot">${ic("alert")}</span><span><b>${plural(older.length, "older payment")} still unpaid</b><br>${money(sum(older))} from before ${mName(mk)} · chase them</span><span class="go">${ic("right")}</span></button>`
-          : ""
-      }
       ${
         showFace
           ? `<div class="setup-card"><div class="ico">${ic("faceid")}</div><div><div class="t">Turn on Face ID</div><div class="d">Glance to unlock instead of typing your password.</div></div><button class="btn sm lime" data-action="faceid-setup">Set up</button><button class="x" data-action="hide-face" aria-label="Not now">${ic("x")}</button></div>`
@@ -935,130 +920,82 @@
           : `
       <div class="filters">
         <div class="seg small full" data-seg="scope">
-          <button class="${S.scope === "month" ? "on" : ""}" data-scope="month" data-status="all">Due in ${mShort(mk)}</button>
-          <button class="${S.scope === "received" ? "on" : ""}" data-scope="received" data-status="all">Paid in ${mShort(mk)}</button>
-          <button class="${S.scope === "unpaid" ? "on" : ""}" data-scope="unpaid" data-status="all">All unpaid</button>
-          <button class="${S.scope === "all" ? "on" : ""}" data-scope="all" data-status="all">All</button>
+          <button class="${S.scope === "month" ? "on" : ""}" data-scope="month">Due in ${mShort(mk)}</button>
+          <button class="${S.scope === "received" ? "on" : ""}" data-scope="received">Paid in ${mShort(mk)}</button>
+          <button class="${S.scope === "all" ? "on" : ""}" data-scope="all">Everything</button>
         </div>
         <div class="filter-row">
           <label class="search">${ic("search")}<input id="q" type="search" placeholder="Search client" value="${esc(S.q)}" autocomplete="off" enterkeyhint="search"></label>
-        </div>
-        <div class="filter-row">
-          <select class="pick${S.fStatus !== "all" ? " active" : ""}" id="fStatus" aria-label="Status">
-            ${[["all", "Any status"], ["notpaid", "Unpaid + overdue"], ["unpaid", "Unpaid"], ["overdue", "Overdue"], ["paid", "Paid"]]
-              .map(([v, l]) => `<option value="${v}" ${S.fStatus === v ? "selected" : ""}>${l}</option>`)
-              .join("")}
-          </select>
-          <select class="pick${S.fPkg !== "all" ? " active" : ""}" id="fPkg" aria-label="Package">
-            <option value="all">Any package</option>
-            ${Object.entries(PKG).map(([v, l]) => `<option value="${v}" ${S.fPkg === v ? "selected" : ""}>${l}</option>`).join("")}
-          </select>
         </div>
       </div>
       <div id="plist"></div>`
       }`;
   }
 
-  function todayCard() {
+  // ---------- Owed: the one place for "who owes me" ----------
+  // Everything due today or late, from any month, oldest first. Same count as the app badge and the morning nudge.
+  function owedItems() {
     const today = londonToday();
-    const unpaid = S.data.payments.filter((p) => !p.paid_date);
-    const dueToday = unpaid.filter((p) => p.due_date === today);
-    const week = unpaid.filter((p) => p.due_date > today && p.due_date <= addDays(today, 7));
-    const overdue = unpaid.filter((p) => p.due_date < today);
-    return `<section class="today-card rise" style="--i:1">
-      <div class="tc-head"><b>Today <span>${fmtShort(today)}</span></b>${
-        needCount() ? `<button class="tc-needs" data-action="needs">${needCount()} need${needCount() === 1 ? "s" : ""} you ${ic("right")}</button>` : ""
-      }</div>
-      ${
-        dueToday.length
-          ? `<div class="tc-list">${dueToday
-              .map(
-                (p) => `<div class="tc-row" data-open-pay="${p.id}" role="button" tabindex="0">
-                  <span class="av sm">${esc(initials(cname(p)))}</span>
-                  <span class="n">${esc(cname(p))}<small>${esc(pkgText(p.package, p.programme_weeks))} · ${METH[p.method]}</small></span>
-                  <span class="a num">${money(p.amount_pence)}</span>
-                  <button class="paybtn sm" data-pay="${p.id}" aria-label="Mark ${esc(cname(p))} as paid">${ic("check")}</button>
-                </div>`
-              )
-              .join("")}</div>`
-          : `<p class="tc-none">${ic("check")} Nothing due today.</p>`
-      }
-      <div class="tc-foot">
-        <span>Next 7 days <b class="num">${week.length ? `${week.length} · ${money(sum(week))}` : "nothing due"}</b></span>
-        ${overdue.length ? `<button class="tc-chase" data-action="chase-list">${ic("chat")} ${overdue.length} overdue · ${money(sum(overdue))}</button>` : ""}
-      </div>
-    </section>`;
+    return S.data.payments
+      .filter((p) => !p.paid_date && p.due_date <= today)
+      .sort((a, b) => (a.due_date < b.due_date ? -1 : a.due_date > b.due_date ? 1 : a.id - b.id));
   }
-
-  // ---------- "Needs you": what the notification / app badge is about ----------
-  function needsItems() {
+  function owedRow(p, today) {
+    const late = p.due_date < today ? daysBetween(p.due_date, today) : 0;
+    const when = late ? `<span class="ow-late">${plural(late, "day")} late</span>` : `<span class="ow-due">Due today</span>`;
+    const more = p.chase_count ? `chased ${p.chase_count > 1 ? p.chase_count + "× · last " : ""}${ago(p.chased_at)}` : late ? "not chased yet" : METH[p.method];
+    return `<div class="ow-row${late ? " late" : ""}">
+      <button class="ow-top" data-open-pay="${p.id}" aria-label="${esc(cname(p))}, ${money(p.amount_pence)}, ${late ? plural(late, "day") + " late" : "due today"}. More options">
+        <span class="av sm">${esc(initials(cname(p)))}</span>
+        <span class="n">${esc(cname(p))}<small>${when} · ${esc(more)}</small></span>
+        <span class="a num">${money(p.amount_pence)}</span>
+      </button>
+      <div class="ow-acts">
+        <button class="btn sm ghost" data-chase="${p.id}">${ic("chat")} Chase</button>
+        <button class="btn sm lime" data-pay="${p.id}">${ic("check")} Paid</button>
+      </div>
+    </div>`;
+  }
+  const OWED_SHOW = 4;
+  function owedCard() {
     const today = londonToday();
-    const unpaid = S.data.payments.filter((p) => !p.paid_date);
-    return {
-      dueToday: unpaid.filter((p) => p.due_date === today),
-      overdue: unpaid.filter((p) => p.due_date < today).sort((a, b) => (a.due_date < b.due_date ? -1 : 1)),
-      ending: decisions().filter((d) => d.p.end_date <= today),
-    };
+    const list = owedItems();
+    const late = list.filter((p) => p.due_date < today);
+    const week = S.data.payments.filter((p) => !p.paid_date && p.due_date > today && p.due_date <= addDays(today, 7));
+    return `<section class="owed rise" style="--i:1" id="owed">
+      <div class="ow-head">
+        <h2>Owed</h2>
+        ${list.length ? `<span class="ow-sum"><b class="num">${money(sum(list))}</b> ${plural(list.length, "payment")}${late.length && late.length < list.length ? ` · ${late.length} late` : late.length ? " · all late" : ""}</span>` : ""}
+      </div>
+      ${
+        list.length
+          ? `<div class="ow-list">${(S.owedAll ? list : list.slice(0, OWED_SHOW)).map((p) => owedRow(p, today)).join("")}</div>
+             ${list.length > OWED_SHOW ? `<button class="ow-more" data-action="owed-more">${S.owedAll ? "Show fewer" : `Show ${list.length - OWED_SHOW} more`}</button>` : ""}`
+          : `<p class="ow-none">${ic("check")} All square. Nothing due today and nobody's late.</p>`
+      }
+      <div class="ow-foot">Next 7 days <b class="num">${week.length ? `${plural(week.length, "payment")} · ${money(sum(week))}` : "nothing due"}</b></div>
+    </section>`;
   }
   // same number as the app icon badge and the morning notification's badge
   function needCount() {
     return actionCount();
   }
-  function needsHtml() {
-    const today = londonToday();
-    const { dueToday, overdue, ending } = needsItems();
-    if (!dueToday.length && !overdue.length && !ending.length)
-      return `<div class="needs-clear">${ic("check")}<b>All clear</b><p>Nothing's waiting on you. If a notification brought you here, whatever it was about has been sorted since.</p></div>`;
-    const row = (p, late) => `<div class="tc-row" data-open-pay="${p.id}" role="button" tabindex="0">
-        <span class="av sm">${esc(initials(cname(p)))}</span>
-        <span class="n">${esc(cname(p))}<small>${
-          late
-            ? `Due ${fmtShort(p.due_date)} · ${plural(daysBetween(p.due_date, today), "day")} late${p.chase_count ? ` · chased ${p.chase_count}×` : " · not chased"}`
-            : `${esc(pkgText(p.package, p.programme_weeks))} · ${METH[p.method]}`
-        }</small></span>
-        <span class="a num">${money(p.amount_pence)}</span>
-        <button class="paybtn sm" data-pay="${p.id}" aria-label="Mark ${esc(cname(p))} as paid">${ic("check")}</button>
-      </div>`;
-    const part = (title, sub, body) => `<section class="needs-part"><h4>${title}<small>${sub}</small></h4><div class="tc-list">${body}</div></section>`;
-    return `
-      <p class="hint">Tick anything that's come in. It drops off here and off the app badge.</p>
-      ${dueToday.length ? part("Due today", `${plural(dueToday.length, "payment")} · ${money(sum(dueToday))}`, dueToday.map((p) => row(p, false)).join("")) : ""}
-      ${
-        overdue.length
-          ? part("Not marked paid yet", `${plural(overdue.length, "payment")} · ${money(sum(overdue))}`, overdue.map((p) => row(p, true)).join("")) +
-            `<button class="btn ghost" data-action="chase-list">${ic("chat")} Chase ${overdue.length === 1 ? "it" : "them"}</button>`
-          : ""
-      }
-      ${
-        ending.length
-          ? part(
-              "Plans ending",
-              "Decide what's next",
-              ending
-                .map(
-                  ({ c, p, ended }) => `<button class="tc-row" data-open-client="${c.id}" data-close-sheet>
-                    <span class="av sm">${esc(initials(c.name))}</span>
-                    <span class="n">${esc(c.name)}<small>${esc(planName(p))} ${ended ? `ended ${fmtShort(p.end_date)}` : "ends today"}</small></span>
-                    <span class="go">${ic("right")}</span>
-                  </button>`
-                )
-                .join("")
-            )
-          : ""
-      }`;
-  }
-  function needsSheet() {
-    const sh = openSheet("Needs you", needsHtml());
-    sh.dataset.kind = "needs";
-  }
-  function refreshNeeds() {
-    if (sheet && sheet.sh.dataset.kind === "needs") $(".sheet-body", sheet.sh).innerHTML = needsHtml();
-  }
-  // opened from the morning notification (/pay/?needs=1, or a message from the service worker)
+  // opened from the morning notification (/pay/?needs=1, or a message from the service worker): show the Owed list
   function openPendingNeeds() {
     if (!S.pendingNeeds || !S.data || S.locked || awayTooLong()) return;
     S.pendingNeeds = false;
-    needsSheet();
+    closeSheet(true);
+    if (S.tab !== "month" || S.clientId) {
+      S.tab = "month";
+      S.clientId = null;
+      render("fade");
+    }
+    const el = $("#owed");
+    if (!el) return;
+    el.scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" });
+    el.classList.remove("flash");
+    void el.offsetWidth;
+    el.classList.add("flash");
   }
 
   function filteredPayments() {
@@ -1066,10 +1003,6 @@
     let ps = S.data.payments.slice();
     if (S.scope === "month") ps = ps.filter((p) => mKey(p.due_date) === mk);
     else if (S.scope === "received") ps = ps.filter((p) => p.paid_date && mKey(p.paid_date) === mk);
-    else if (S.scope === "unpaid") ps = ps.filter((p) => !p.paid_date);
-    if (S.fStatus === "notpaid") ps = ps.filter((p) => !p.paid_date);
-    else if (S.fStatus !== "all") ps = ps.filter((p) => stOf(p) === S.fStatus);
-    if (S.fPkg !== "all") ps = ps.filter((p) => p.package === S.fPkg);
     if (S.q.trim()) {
       const q = S.q.trim().toLowerCase();
       ps = ps.filter((p) => cname(p).toLowerCase().includes(q));
@@ -1087,12 +1020,12 @@
     const ps = filteredPayments();
     if (!ps.length) {
       const msg =
-        S.q || S.fStatus !== "all" || S.fPkg !== "all"
-          ? "Nothing matches those filters."
+        S.q
+          ? "Nobody by that name here."
           : S.scope === "received"
           ? `Nothing marked as paid in ${mName(S.month)} yet.`
-          : S.scope === "unpaid"
-          ? "Nobody owes you anything. Nice."
+          : S.scope === "all"
+          ? "No payments yet."
           : `Nothing scheduled for ${mName(S.month)} yet.`;
       el.innerHTML = `<div class="empty"><b>${msg}</b>${S.scope === "month" ? `<button class="btn sm" data-action="add-payment">${ic("plus")} Add payment</button>` : ""}</div>`;
       return;
@@ -1147,7 +1080,7 @@
         </div>
         <div class="wk"><span>M</span><span>T</span><span>W</span><span>T</span><span>F</span><span>S</span><span>S</span></div>
         <div class="grid ${S.calAnim}" id="calGrid">${cells}</div>
-        <div class="cal-legend"><span><i style="background:var(--red)"></i>Overdue</span><span><i style="background:var(--amber)"></i>Unpaid</span><span><i style="background:var(--green)"></i>Paid</span></div>
+        <div class="cal-legend"><span><i style="background:var(--red)"></i>Late</span><span><i style="background:var(--amber)"></i>Unpaid</span><span><i style="background:var(--green)"></i>Paid</span></div>
       </div>
       <div class="cal-totals">
         <div class="tile rise" style="--i:1"><div class="k">Due in ${mShort(mk)}</div><div class="v">${count("cdue", st.dueSum)}</div><div class="s">${money(st.unpaidSum)} still unpaid</div></div>
@@ -1209,7 +1142,7 @@
         const cp = curPlan(c.id);
         const plan = cp ? (cp.kind === "break" ? `On a break${cp.end_date ? ` until ${fmtDay(cp.end_date)}` : ""}` : `${planName(cp)} · ${planPrice(cp)}`) : upcomingPlan(c.id) ? `Starts ${fmtDay(upcomingPlan(c.id).start_date)}` : status === "finished" ? `Finished ${fmtDay(c.finished_on)}` : "No plan yet";
         const right = owes.length
-          ? `<b class="owe num">${money(sum(owes))}</b>overdue`
+          ? `<b class="owe num">${money(sum(owes))}</b>late`
           : next
           ? `<b class="num">${money(next.amount_pence)}</b>next ${fmtDay(next.due_date)}`
           : `<b>—</b>nothing due`;
@@ -1274,7 +1207,7 @@
         <button class="btn ghost" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add payment</button>
       </div>
       <div class="tiles" style="grid-template-columns:1fr 1fr">
-        <button class="tile red rise${owes.length ? " has" : ""}" style="--i:3" ${owes.length ? `data-chase-client="${c.id}"` : "disabled"}><div class="k">Overdue</div><div class="v">${count("c-owe-" + c.id, sum(owes))}</div><div class="s">${owes.length ? '<span class="live"></span>' + plural(owes.length, "payment") + " · chase" : "All square"}</div></button>
+        <button class="tile red rise${owes.length ? " has" : ""}" style="--i:3" ${owes.length ? `data-chase-client="${c.id}"` : "disabled"}><div class="k">Late</div><div class="v">${count("c-owe-" + c.id, sum(owes))}</div><div class="s">${owes.length ? '<span class="live"></span>' + plural(owes.length, "payment") + " · chase" : "All square"}</div></button>
         <div class="tile lime rise" style="--i:4"><div class="k">Received</div><div class="v" style="font-size:27px">${count("c-got-" + c.id, sum(received))}</div><div class="s">${received.length ? `≈ ${money(avg)}/month over ${plural(months, "month")}` : "since tracking began"}</div></div>
         ${
           rate
@@ -1943,7 +1876,7 @@
   }
   const rerender = () => {
     render();
-    refreshNeeds();
+    refreshPaySheet();
   };
 
   // ---------- sheets: payments ----------
@@ -2322,21 +2255,10 @@
           <div class="field"><label for="p-due">Due date</label><input id="p-due" type="date" value="${f.due_date}"></div>
         </div>
         <div class="field"><span class="lab">Payment method</span>${opts("method", METH, f.method)}</div>
-        ${
-          isEdit
-            ? `<div class="status-card ${st}"><div class="l"><b>${STL[st]}</b><small>${
-                st === "paid" ? `Received ${fmtLong(p.paid_date)}` : st === "overdue" ? `${plural(daysBetween(p.due_date, today), "day")} past due` : `Due ${fmtLong(p.due_date)}`
-              }${p.chase_count && !p.paid_date ? ` · chased ${p.chase_count}× (last ${ago(p.chased_at)})` : ""}</small></div><span class="switch"><input type="checkbox" id="p-paid" ${p.paid_date ? "checked" : ""} aria-label="Paid"><i></i></span></div>
-               <div class="field" id="p-paid-f" ${p.paid_date ? "" : "hidden"}><label for="p-paiddate">Date received</label><input id="p-paiddate" type="date" value="${p.paid_date || today}"></div>
-               ${!p.paid_date ? `<button type="button" class="btn ghost" data-chase="${p.id}">${ic("chat")} Chase this payment</button>` : ""}`
-            : ""
-        }
         <div class="field"><label for="p-notes">Notes <span>optional</span></label><textarea id="p-notes" rows="2">${esc(f.notes)}</textarea></div>
         <div class="form-err" id="p-err"></div>
         <button class="btn lime" type="submit">${isEdit ? "Save changes" : "Add payment"}</button>
-        ${isEdit && !p.paid_date ? `<button class="btn ghost" type="button" id="p-skip">${ic("pause")} Skip this payment</button><p class="hint center">Skipping keeps it as money lost. Delete is only for mistakes.</p>` : ""}
-        ${isEdit ? `<button class="btn danger" type="button" id="p-del">Delete this payment</button>` : ""}
-        ${plan ? `<button class="linkish center" type="button" data-open-client="${p.client_id}" data-close-sheet>View ${esc(firstName(cname(p)))}'s plans</button>` : ""}
+        ${isEdit ? `<button class="btn danger" type="button" id="p-del">Delete this payment</button><p class="hint center">Delete is only for mistakes. If they're not paying, go back and skip it, so it shows as money lost.</p>` : ""}
       </form>`;
     openSheet(isEdit ? `${cname(p)} · ${money(p.amount_pence)}` : "Add payment", html, (sh) => {
       const weeksF = $("#p-weeks-f", sh);
@@ -2358,10 +2280,6 @@
           $("#p-amt", sh).value = moneyInput(d.amount_pence);
         });
       } else {
-        const paid = $("#p-paid", sh);
-        paid.addEventListener("change", () => ($("#p-paid-f", sh).hidden = !paid.checked));
-        const skipBtn = $("#p-skip", sh);
-        if (skipBtn) skipBtn.onclick = () => skipSheet(p);
         $("#p-del", sh).onclick = async () => {
           if (!confirm(`Delete this ${money(p.amount_pence)} payment from ${cname(p)}? This can't be undone.`)) return;
           try {
@@ -2391,7 +2309,7 @@
         if (!body.client_id) return (err.textContent = "Choose a client.");
         if (body.amount_pence == null) return (err.textContent = "Enter the amount in pounds, e.g. 160 or 42.50.");
         if (!body.due_date) return (err.textContent = "Pick a due date.");
-        if (isEdit) body.paid_date = $("#p-paid", sh).checked ? $("#p-paiddate", sh).value || today : null;
+        if (isEdit) body.paid_date = p.paid_date || null;
         const btn = $("button[type=submit]", sh);
         btn.disabled = true;
         try {
@@ -2407,6 +2325,106 @@
         }
       };
     });
+  }
+
+  // Tap a payment: what you actually do with it first. The form is behind "Edit details".
+  function payActionsHtml(p) {
+    const today = londonToday();
+    const st = stOf(p);
+    const plan = p.plan_id ? planOf(p.plan_id) : null;
+    const late = st === "overdue" ? daysBetween(p.due_date, today) : 0;
+    const head = st === "paid" ? `Paid ${fmtLong(p.paid_date)}` : late ? `${plural(late, "day")} late` : p.due_date === today ? "Due today" : `Due ${fmtLong(p.due_date)}`;
+    const bits = [];
+    if (st === "paid" || late) bits.push(`Due ${fmtShort(p.due_date)}`);
+    bits.push(plan ? `${planName(plan)} · ${planPrice(plan)}` : pkgText(p.package, p.programme_weeks));
+    bits.push(METH_LONG[p.method]);
+    if (p.chase_count && !p.paid_date) bits.push(`Chased ${p.chase_count > 1 ? p.chase_count + "× · last " : ""}${ago(p.chased_at)}`);
+    const act = (key, icon, title, sub) => `<button class="action" type="button" data-pact="${key}"><span class="ic">${ic(icon)}</span><span><b>${title}</b>${sub ? `<small>${sub}</small>` : ""}</span></button>`;
+    return `
+      <div class="status-card ${st}"><div class="l"><b>${head}</b><small>${bits.map(esc).join(" · ")}</small></div></div>
+      ${
+        st === "paid"
+          ? `<div class="action-list pay-acts">
+              ${act("date", "cal", "Change the date it came in", "")}
+              ${act("unpay", "undo", "Not paid after all", "Puts it back as owed")}
+              ${act("edit", "edit", "Edit details", "Amount, due date, method, notes")}
+            </div>`
+          : `<button class="btn lime" type="button" data-pact="paid-today">${ic("check")} Paid today</button>
+            <div class="paid-on" hidden>
+              <div class="field"><label for="pa-date">Date it came in</label><input id="pa-date" type="date" value="${today}" max="${today}"></div>
+              <button class="btn" type="button" data-pact="paid-on-save">Save</button>
+            </div>
+            <div class="action-list pay-acts">
+              ${act("paid-other", "cal", "Paid on another day", "")}
+              ${act("chase", "chat", "Chase", "WhatsApp or text, message ready to send")}
+              ${act("skip", "pause", "Skip this payment", "They're not paying this one. Counts as money lost")}
+              ${act("edit", "edit", "Edit details", "Amount, due date, method, notes")}
+            </div>`
+      }
+      ${plan ? `<button class="linkish center" type="button" data-open-client="${p.client_id}" data-close-sheet>Open ${esc(firstName(cname(p)))}'s page</button>` : ""}`;
+  }
+  function paymentActions(p) {
+    const sh = openSheet(`${cname(p)} · ${money(p.amount_pence)}`, payActionsHtml(p), (sh) => {
+      sh.addEventListener("click", async (e) => {
+        const b = e.target.closest("[data-pact]");
+        if (!b) return;
+        const cur = S.data.payments.find((x) => x.id === Number(sh.dataset.pid));
+        if (!cur) return closeSheet();
+        const k = b.dataset.pact;
+        if (k === "paid-today") {
+          closeSheet();
+          return quickPay(cur.id);
+        }
+        if (k === "paid-other") {
+          const box = $(".paid-on", sh);
+          box.hidden = false;
+          b.hidden = true;
+          $("#pa-date", sh).focus();
+          return;
+        }
+        if (k === "paid-on-save") {
+          const date = $("#pa-date", sh).value || londonToday();
+          b.disabled = true;
+          try {
+            const r = await api(`/payments/${cur.id}/paid`, { method: "POST", body: { paid_date: date } });
+            setData(r.data);
+            closeSheet();
+            rerender();
+            haptic();
+            toast(`${cname(cur)} · ${money(cur.amount_pence)} paid ${fmtShort(date)}`);
+          } catch (err) {
+            b.disabled = false;
+            fail(err);
+          }
+          return;
+        }
+        if (k === "unpay") {
+          try {
+            const r = await api(`/payments/${cur.id}/paid`, { method: "POST", body: { paid_date: null } });
+            setData(r.data);
+            closeSheet();
+            rerender();
+            toast("Back on as owed");
+          } catch (err) {
+            fail(err);
+          }
+          return;
+        }
+        if (k === "date") return paidDateSheet(cur.id);
+        if (k === "chase") return chaseSheet([cur]);
+        if (k === "skip") return skipSheet(cur);
+        if (k === "edit") return paymentSheet(cur);
+      });
+    });
+    sh.dataset.kind = "pay";
+    sh.dataset.pid = p.id;
+  }
+  // keep an open payment sheet in step after something changes underneath it
+  function refreshPaySheet() {
+    if (!sheet || sheet.sh.dataset.kind !== "pay") return;
+    const p = S.data.payments.find((x) => x.id === Number(sheet.sh.dataset.pid));
+    if (!p) return closeSheet();
+    $(".sheet-body", sheet.sh).innerHTML = payActionsHtml(p);
   }
 
   async function quickPay(id) {
@@ -2506,10 +2524,10 @@
   function chaseSheet(list) {
     const today = londonToday();
     const ps = (list || S.data.payments.filter((p) => !p.paid_date && p.due_date < today)).slice().sort((a, b) => (a.due_date < b.due_date ? -1 : 1));
-    if (!ps.length) return toast("Nothing overdue to chase.");
+    if (!ps.length) return toast("Nothing late to chase.");
     const canShare = !!navigator.share;
     const html = `
-      <p class="hint">${list && list.length === 1 ? "" : `${plural(ps.length, "payment")} · ${money(sum(ps))} overdue. `}Tap how you want to send it. Your message opens ready to go, you just hit send.</p>
+      <p class="hint">${list && list.length === 1 ? "" : `${plural(ps.length, "payment")} · ${money(sum(ps))} late. `}Tap how you want to send it. Your message opens ready to go, you just hit send.</p>
       <div class="chase-list">${ps
         .map((p) => {
           const c = client(p.client_id);
@@ -3483,8 +3501,12 @@
           }
           case "chase-list":
             return chaseSheet();
+          case "owed-more":
+            S.owedAll = !S.owedAll;
+            return rerender();
           case "needs":
-            return needsSheet();
+            S.pendingNeeds = true;
+            return openPendingNeeds();
           case "template":
             return templateSheet();
           case "goal":
@@ -3535,9 +3557,8 @@
       }
       if (d.scope) {
         S.scope = d.scope;
-        if (d.status) S.fStatus = d.status;
         rerender();
-        if (t.classList.contains("tile") || t.classList.contains("banner")) {
+        if (t.classList.contains("landed-line")) {
           const el = $(".section-head");
           if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
         }
@@ -3545,7 +3566,7 @@
       }
       if (d.openPay) {
         const p = S.data.payments.find((x) => x.id === Number(d.openPay));
-        if (p) paymentSheet(p);
+        if (p) paymentActions(p);
         return;
       }
       if (d.openClient) {
@@ -3605,14 +3626,6 @@
     }
   });
   document.addEventListener("change", async (e) => {
-    if (e.target.id === "fStatus") {
-      S.fStatus = e.target.value;
-      rerender();
-    }
-    if (e.target.id === "fPkg") {
-      S.fPkg = e.target.value;
-      rerender();
-    }
     if (e.target.id === "lockSel") {
       try {
         await api("/settings", { method: "POST", body: { lockMinutes: Number(e.target.value) } });
@@ -3814,7 +3827,7 @@
       S.session = s;
       setData(await api("/data"));
       if (!sheet) rerender();
-      else refreshNeeds();
+      else refreshPaySheet();
       openPendingNeeds();
     } catch {}
   });

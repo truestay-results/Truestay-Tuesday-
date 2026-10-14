@@ -76,7 +76,7 @@ The inset only goes negative on an axis where the control is smaller than 44, so
 The full list of controls that use it is in the "v4: Apple HIG pass" block at the bottom of `app.css`.
 Calendar days use the horizontal-only version so neighbouring rows do not overlap.
 
-Two deliberate exceptions to "just make it 44 visible": the row tick (`.paybtn`) stays 40px visible with a 44px tap area, because 44 visible squeezed client names in a row, and the small tick on the Today card is 34px visible with the same trick.
+Two deliberate exceptions to "just make it 44 visible": the row tick (`.paybtn`) stays 40px visible with a 44px tap area, because 44 visible squeezed client names in a row, and the Owed card's Chase and Paid buttons are full 44px buttons with words, not icons.
 
 ## Shape and space
 
