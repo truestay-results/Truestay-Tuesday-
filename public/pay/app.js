@@ -1122,7 +1122,10 @@
   function sessState(cid, mk = mKey(londonToday())) {
     const plan = curPlan(cid);
     const done = sessionsIn(cid, mk);
-    const of = perMonth(plan);
+    // a new plan (paid ahead, back from a break) keeps the number from their last plan until you change it
+    const today = londonToday();
+    const last = plansOf(cid).filter((p) => p.start_date <= today && p.kind !== "break" && p.sessions_per_week > 0).pop();
+    const of = perMonth(plan) ?? perMonth(last);
     return { plan, done, n: done.length, of, left: of == null ? null : of - done.length };
   }
   // "2 of 4 left", in the words you'd use
