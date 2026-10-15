@@ -826,9 +826,12 @@
     const range = monthRange();
     const maxBar = Math.max(1, ...range.map((k) => sum(S.data.payments.filter((p) => mKey(p.due_date) === k)) + (all ? incomeStats(k).dueSum : 0)));
     const idx = range.indexOf(mk);
-    const pct = st.dueSum ? Math.round((st.collected / st.dueSum) * 100) : 0;
     // late = due in this month, before today, still not in
     const lateSum = sum(st0.unpaid.filter((p) => p.due_date < today)) + (all ? sum(ist.unpaid.filter((e) => e.due_date < today)) : 0);
+    const inN = st0.due.length - st0.unpaid.length + (all ? ist.due.length - ist.unpaid.length : 0);
+    const waitN = st0.unpaid.length + (all ? ist.unpaid.length : 0);
+    const toCome = st.unpaidSum - lateSum;
+    const splitLabel = `${money(st.collected)} in, ${money(st.unpaidSum)} still to come${lateSum ? `, ${money(lateSum)} of it late` : ""}`;
     // what actually landed in this month by paid date, and how much of that was due in an earlier month
     const landed = st.receivedSum;
     const earlier = sum(st0.received.filter((p) => mKey(p.due_date) < mk)) + (all ? sum(ist.received.filter((e) => mKey(e.due_date) < mk)) : 0);
@@ -839,7 +842,6 @@
     return `
       ${topbar(`<span class="coin-logo spin">£</span>`, `<a class="round" href="${API}/export?type=payments" aria-label="Export payments CSV">${ic("download")}</a>${settingsBtn()}`)}
       <h1 class="hello rise" style="--i:0">${greet}${name}. <em>Here's what's</em> coming in.</h1>
-      ${noClients ? "" : owedCard()}
       ${decs.map((d, i) => decisionCard(d, i + 1)).join("")}
 
       <div class="monthbar rise" style="--i:1">
@@ -856,13 +858,14 @@
             const ik = all ? incomeStats(k) : null;
             const due = sum(ps) + (ik ? ik.dueSum : 0);
             const got = sum(ps.filter((p) => p.paid_date)) + (ik ? ik.collected : 0);
-            const hh = Math.round((due / maxBar) * 40);
-            const hg = due ? Math.round((got / due) * hh) : 0;
-            return `<button class="mpill${k === mk ? " sel" : ""}${k === cur ? " now" : ""}" data-month="${k}" style="--i:${i}" aria-label="${mLabel(k)}">
-              <div class="bars">
-                <div class="bar" style="height:${Math.max(4, hh - hg)}px;${hg ? "border-radius:8px 8px 0 0" : ""}"></div>
-                ${hg ? `<div class="bar recv" style="height:${hg}px;border-radius:0 0 4px 4px"></div>` : ""}
-              </div>
+            const late = sum(ps.filter((p) => !p.paid_date && p.due_date < today)) + (ik ? sum(ik.unpaid.filter((e) => e.due_date < today)) : 0);
+            const hh = Math.max(4, Math.round((due / maxBar) * 40));
+            // one bar per month: green for what's in, red for late, amber for still to come
+            const gi = due ? Math.round((got / due) * 100) : 0;
+            const gl = due ? Math.round(((got + late) / due) * 100) : 0;
+            const fill = due ? `background:linear-gradient(to top, var(--green) 0 ${gi}%, var(--red) ${gi}% ${gl}%, var(--amber) ${gl}% 100%)` : "";
+            return `<button class="mpill${k === mk ? " sel" : ""}${k === cur ? " now" : ""}" data-month="${k}" style="--i:${i}" aria-label="${mLabel(k)}${due ? `: ${money(got)} in, ${money(due - got)} still to come` : ""}">
+              <div class="bars"><div class="bar${due ? " split-bar" : ""}" style="height:${hh}px;${fill}"></div></div>
               <span class="lbl">${mShort(k)}</span></button>`;
           })
           .join("")}
@@ -875,13 +878,29 @@
         <div class="sub">${
           all ? `${money(st0.dueSum)} from clients · ${money(ist.dueSum)} other income` : plural(st.due.length, "payment")
         }</div>
-        <div class="progress" role="img" aria-label="${pct}% of it in">
-          <div class="fill" data-pct="${pct}" style="width:${S.counts.pct ?? 0}%"><span class="knob">${count("pct", pct, "pct")}</span></div>
-        </div>
-        <div class="money-line">
-          <div><span>In</span><b class="num">${money(st.collected)}</b></div>
-          <div><span>Not in yet</span><b class="num">${money(st.unpaidSum)}</b></div>
-          ${lateSum ? `<div class="late"><span>Of that, late</span><b class="num">${money(lateSum)}</b></div>` : ""}
+        <div class="split" role="img" aria-label="${splitLabel}">${
+          st.dueSum
+            ? [
+                ["in", st.collected],
+                ["late", lateSum],
+                ["wait", toCome],
+              ]
+                .filter(([, v]) => v > 0)
+                .map(([k, v]) => `<i class="${k}" style="flex-grow:${v}"></i>`)
+                .join("")
+            : ""
+        }</div>
+        <div class="halves">
+          <button class="half in" data-jump="in" aria-label="In: ${money(st.collected)}. Show who's paid">
+            <span><i class="dot"></i>In</span>
+            <b class="num">${money(st.collected)}</b>
+            <small>${inN ? plural(inN, "payment") : "Nothing yet"}</small>
+          </button>
+          <button class="half wait" data-jump="wait" aria-label="Waiting on: ${money(st.unpaidSum)}${lateSum ? `, ${money(lateSum)} of it late` : ""}. Show who hasn't paid">
+            <span><i class="dot"></i>Waiting on</span>
+            <b class="num">${money(st.unpaidSum)}</b>
+            <small>${waitN ? plural(waitN, "payment") : "Nothing"}${lateSum ? ` · <em>${money(lateSum)} late</em>` : ""}</small>
+          </button>
         </div>
         ${
           landed !== st.collected
@@ -894,12 +913,6 @@
         })()}
       </section>
 
-      ${
-        all
-          ? `<div class="section-head"><h2 class="sm">Other income in ${mName(mk)}</h2><button class="linkish" data-tab="income">See all</button></div>
-             ${ist.due.length ? `<div class="list">${ist.due.map((e) => irow(e)).join("")}</div>` : `<div class="empty"><b>No other income in ${mName(mk)}</b><button class="btn sm" data-action="add-income">${ic("plus")} Add income</button></div>`}`
-          : ""
-      }
       ${mk === mKey(TRACK_START) ? `<p class="note">${ic("info")}<span>Tracking started on 28 September 2026, so September only includes payments from then on.</span></p>` : ""}
       ${mk > cur ? `<p class="note">${ic("info")}<span>Only shows payments already on the books. Monthly plans add theirs about a month ahead.</span></p>` : ""}
       ${
@@ -908,18 +921,12 @@
           : ""
       }
 
-      <div class="section-head">
-        <h2>Payments</h2>
-        <div class="seg small icons" data-seg="listmode" aria-label="View">
-          <button class="${S.listMode === "list" ? "on" : ""}" data-listmode="list" aria-label="List view">${ic("list")}</button>
-          <button class="${S.listMode === "table" ? "on" : ""}" data-listmode="table" aria-label="Table view">${ic("table")}</button>
-        </div>
-      </div>
       ${
         noClients
-          ? `<div class="empty"><b>Let's get your clients in</b><span>Add each client with their plan. Monthly plans look after their own payments.</span><button class="btn sm lime" data-action="add-client">${ic("userplus")} Add your first client</button></div>`
+          ? `<div class="section-head"><h2>Payments</h2></div>
+             <div class="empty"><b>Let's get your clients in</b><span>Add each client with their plan. Monthly plans look after their own payments.</span><button class="btn sm lime" data-action="add-client">${ic("userplus")} Add your first client</button></div>`
           : `
-      <div class="filters">
+      <div class="filters" id="payments" aria-label="Payments">
         <div class="seg small full" data-seg="scope">
           <button class="${S.scope === "month" ? "on" : ""}" data-scope="month">Due in ${mShort(mk)}</button>
           <button class="${S.scope === "received" ? "on" : ""}" data-scope="received">Paid in ${mShort(mk)}</button>
@@ -927,71 +934,98 @@
         </div>
         <div class="filter-row">
           <label class="search">${ic("search")}<input id="q" type="search" placeholder="Search client" value="${esc(S.q)}" autocomplete="off" enterkeyhint="search"></label>
+          <div class="seg small icons" data-seg="listmode" aria-label="View">
+            <button class="${S.listMode === "list" ? "on" : ""}" data-listmode="list" aria-label="List view">${ic("list")}</button>
+            <button class="${S.listMode === "table" ? "on" : ""}" data-listmode="table" aria-label="Table view">${ic("table")}</button>
+          </div>
         </div>
       </div>
       <div id="plist"></div>`
       }`;
   }
 
-  // ---------- Owed: the one place for "who owes me" ----------
-  // Everything due today or late, from any month, oldest first. Same count as the app badge and the morning nudge.
-  function owedItems() {
+  // ---------- Month list: Waiting on (amber) and In (green) ----------
+  // Words first, colour backs them up: green is in, amber is still to come, red is late.
+  const dueWords = (iso, today) => {
+    const d = daysBetween(today, iso);
+    return d === 0 ? "Due today" : d === 1 ? "Due tomorrow" : `Due ${fmtShort(iso)}`;
+  };
+  // one payment: the name in full, what's happening with it, the amount, and a tick for when it lands
+  function mrow(p, { showDue = false } = {}) {
     const today = londonToday();
-    return S.data.payments
-      .filter((p) => !p.paid_date && p.due_date <= today)
-      .sort((a, b) => (a.due_date < b.due_date ? -1 : a.due_date > b.due_date ? 1 : a.id - b.id));
+    const st = stOf(p);
+    const late = st === "overdue" ? daysBetween(p.due_date, today) : 0;
+    const head =
+      st === "paid"
+        ? `<span class="s-in">Paid ${fmtShort(p.paid_date)}</span>`
+        : late
+        ? `<span class="s-late">${plural(late, "day")} late</span>`
+        : `<span class="${p.due_date <= addDays(today, 1) ? "s-soon" : "s-wait"}">${dueWords(p.due_date, today)}</span>`;
+    const bits = [head];
+    if (late && showDue) bits.push(`due ${fmtDay(p.due_date)}`);
+    if (p.method === "dd") bits.push("Direct debit");
+    if (p.chase_count && !p.paid_date) bits.push(`chased ${p.chase_count > 1 ? p.chase_count + "× · last " : ""}${ago(p.chased_at)}`);
+    const nm = esc(cname(p));
+    const row = `<div class="prow mrow st-${st}" data-open-pay="${p.id}" role="button" tabindex="0">
+        <div class="main">
+          <div class="name">${nm}</div>
+          <div class="st">${bits.join(" · ")}</div>
+          ${late ? `<button class="chase-pill" data-chase="${p.id}">${ic("chat")} Chase</button>` : ""}
+        </div>
+        <div class="amt num">${money(p.amount_pence)}</div>
+        ${st === "paid" ? "" : `<button class="tick" data-pay="${p.id}" aria-label="Mark ${nm} as paid">${ic("check")}</button>`}
+      </div>`;
+    return st === "paid"
+      ? `<div class="swipe" data-pid="${p.id}">${row}</div>`
+      : `<div class="swipe" data-pid="${p.id}"><div class="swipe-bg chase">${ic("chat")} Chase</div><div class="swipe-bg paid">${ic("check")} Paid</div>${row}</div>`;
   }
-  function owedRow(p, today) {
-    const late = p.due_date < today ? daysBetween(p.due_date, today) : 0;
-    const when = late ? `<span class="ow-late">${plural(late, "day")} late</span>` : `<span class="ow-due">Due today</span>`;
-    const more = p.chase_count ? `chased ${p.chase_count > 1 ? p.chase_count + "× · last " : ""}${ago(p.chased_at)}` : late ? "not chased yet" : METH[p.method];
-    return `<div class="ow-row${late ? " late" : ""}">
-      <button class="ow-top" data-open-pay="${p.id}" aria-label="${esc(cname(p))}, ${money(p.amount_pence)}, ${late ? plural(late, "day") + " late" : "due today"}. More options">
-        <span class="av sm">${esc(initials(cname(p)))}</span>
-        <span class="n">${esc(cname(p))}<small>${when} · ${esc(more)}</small></span>
-        <span class="a num">${money(p.amount_pence)}</span>
-      </button>
-      <div class="ow-acts">
-        <button class="btn sm ghost" data-chase="${p.id}">${ic("chat")} Chase</button>
-        <button class="btn sm lime" data-pay="${p.id}">${ic("check")} Paid</button>
-      </div>
-    </div>`;
-  }
-  const OWED_SHOW = 4;
-  function owedCard() {
+  // other income in the same list, when All revenue is on
+  function mirow(e) {
     const today = londonToday();
-    const list = owedItems();
-    const late = list.filter((p) => p.due_date < today);
-    const week = S.data.payments.filter((p) => !p.paid_date && p.due_date > today && p.due_date <= addDays(today, 7));
-    return `<section class="owed rise" style="--i:1" id="owed">
-      <div class="ow-head">
-        <h2>Owed</h2>
-        ${list.length ? `<span class="ow-sum"><b class="num">${money(sum(list))}</b> ${plural(list.length, "payment")}${late.length && late.length < list.length ? ` · ${late.length} late` : late.length ? " · all late" : ""}</span>` : ""}
-      </div>
-      ${
-        list.length
-          ? `<div class="ow-list">${(S.owedAll ? list : list.slice(0, OWED_SHOW)).map((p) => owedRow(p, today)).join("")}</div>
-             ${list.length > OWED_SHOW ? `<button class="ow-more" data-action="owed-more">${S.owedAll ? "Show fewer" : `Show ${list.length - OWED_SHOW} more`}</button>` : ""}`
-          : `<p class="ow-none">${ic("check")} All square. Nothing due today and nobody's late.</p>`
-      }
-      <div class="ow-foot">Next 7 days <b class="num">${week.length ? `${plural(week.length, "payment")} · ${money(sum(week))}` : "nothing due"}</b></div>
+    const st = istOf(e);
+    const late = st === "overdue" ? daysBetween(e.due_date, today) : 0;
+    const head =
+      st === "paid"
+        ? `<span class="s-in">Received ${fmtShort(e.received_date)}</span>`
+        : late
+        ? `<span class="s-late">${plural(late, "day")} late</span>`
+        : `<span class="${e.due_date <= addDays(today, 1) ? "s-soon" : "s-wait"}">${dueWords(e.due_date, today).replace("Due", "Expected")}</span>`;
+    const nm = esc(srcName(e));
+    return `<div class="swipe"><div class="prow mrow st-${st}" data-open-inc="${e.id}" role="button" tabindex="0">
+        <div class="main">
+          <div class="name">${nm}</div>
+          <div class="st">${head} · ${esc(INC_TYPE[srcOf(e.source_id)?.type] || "Other")}</div>
+        </div>
+        <div class="amt num">${money(e.amount_pence)}</div>
+        ${st === "paid" ? "" : `<button class="tick" data-inc-recv="${e.id}" aria-label="Mark ${nm} as received">${ic("check")}</button>`}
+      </div></div>`;
+  }
+  function grp(kind, title, rows, empty) {
+    const total = rows.reduce((a, r) => a + r.amt, 0);
+    return `<section class="grp ${kind}" id="g-${kind}">
+      <div class="gh"><h3><i class="dot" aria-hidden="true"></i>${title}${rows.length ? ` <small>${rows.length}</small>` : ""}</h3>${rows.length ? `<b class="num">${money(total)}</b>` : ""}</div>
+      <div class="glist">${rows.length ? rows.map((r) => r.h).join("") : `<p class="gnone">${empty}</p>`}</div>
     </section>`;
   }
   // same number as the app icon badge and the morning notification's badge
   function needCount() {
     return actionCount();
   }
-  // opened from the morning notification (/pay/?needs=1, or a message from the service worker): show the Owed list
+  // opened from the morning notification (/pay/?needs=1, or a message from the service worker): this month's Waiting on list
   function openPendingNeeds() {
     if (!S.pendingNeeds || !S.data || S.locked || awayTooLong()) return;
     S.pendingNeeds = false;
     closeSheet(true);
-    if (S.tab !== "month" || S.clientId) {
+    const cur = mKey(londonToday());
+    if (S.tab !== "month" || S.clientId || S.month !== cur || S.scope !== "month" || S.q) {
       S.tab = "month";
       S.clientId = null;
+      S.month = cur;
+      S.scope = "month";
+      S.q = "";
       render("fade");
     }
-    const el = $("#owed");
+    const el = $("#g-before") || $("#g-wait") || $("#plist");
     if (!el) return;
     el.scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" });
     el.classList.remove("flash");
@@ -1014,28 +1048,60 @@
     else ps.sort(byDue);
     return ps;
   }
+  function emptyList() {
+    const msg = S.q
+      ? "Nobody by that name here."
+      : S.scope === "received"
+      ? `Nothing marked as paid in ${mName(S.month)} yet.`
+      : S.scope === "all"
+      ? "No payments yet."
+      : `Nothing scheduled for ${mName(S.month)} yet.`;
+    return `<div class="empty"><b>${msg}</b>${S.scope === "month" && !S.q ? `<button class="btn sm" data-action="add-payment">${ic("plus")} Add payment</button>` : ""}</div>`;
+  }
 
   function renderList() {
     const el = $("#plist");
     if (!el) return;
     const ps = filteredPayments();
-    if (!ps.length) {
-      const msg =
-        S.q
-          ? "Nobody by that name here."
-          : S.scope === "received"
-          ? `Nothing marked as paid in ${mName(S.month)} yet.`
-          : S.scope === "all"
-          ? "No payments yet."
-          : `Nothing scheduled for ${mName(S.month)} yet.`;
-      el.innerHTML = `<div class="empty"><b>${msg}</b>${S.scope === "month" ? `<button class="btn sm" data-action="add-payment">${ic("plus")} Add payment</button>` : ""}</div>`;
+    if (S.listMode === "table") {
+      el.innerHTML = ps.length
+        ? ptable(ps) + `<div class="total-line"><span>${plural(ps.length, "payment")}</span><span>Total <b class="num">${money(sum(ps))}</b></span></div>`
+        : emptyList();
       return;
     }
-    const hasUnpaid = ps.some((p) => !p.paid_date);
-    el.innerHTML =
-      (S.listMode === "table" ? ptable(ps) : `<div class="list">${ps.map((p) => prow(p)).join("")}</div>`) +
-      `<div class="total-line"><span>${plural(ps.length, "payment")}</span><span>Total <b class="num">${money(sum(ps))}</b></span></div>` +
-      (S.listMode === "list" && hasUnpaid ? `<p class="tip">Swipe left to mark paid · swipe right to chase</p>` : "");
+    const today = londonToday();
+    const mk = S.month;
+    const q = S.q.trim().toLowerCase();
+    const hit = (name) => !q || name.toLowerCase().includes(q);
+    let inc = S.allRev ? incAll().filter((e) => hit(srcName(e))) : [];
+    if (S.scope === "month") inc = inc.filter((e) => mKey(e.due_date) === mk);
+    else if (S.scope === "received") inc = inc.filter((e) => e.received_date && mKey(e.received_date) === mk);
+    const P = (p, o) => ({ due: p.due_date, got: p.paid_date, amt: p.amount_pence, h: mrow(p, o) });
+    const I = (e) => ({ due: e.due_date, got: e.received_date, amt: e.amount_pence, h: mirow(e) });
+    const rows = [...ps.map((p) => P(p)), ...inc.map(I)];
+    const asc = (k) => (a, b) => (a[k] < b[k] ? -1 : a[k] > b[k] ? 1 : 0);
+    const waiting = rows.filter((r) => !r.got).sort(asc("due"));
+    const got = rows.filter((r) => r.got).sort((a, b) => asc("got")(b, a));
+    // still owed from an earlier month: only on this month's page, at the top
+    const before =
+      S.scope === "month" && mk === mKey(today)
+        ? [
+            ...S.data.payments.filter((p) => !p.paid_date && mKey(p.due_date) < mk && hit(cname(p))).map((p) => P(p, { showDue: true })),
+            ...(S.allRev ? incAll().filter((e) => !e.received_date && mKey(e.due_date) < mk && hit(srcName(e))).map(I) : []),
+          ].sort(asc("due"))
+        : [];
+    if (!rows.length && !before.length) {
+      el.innerHTML = emptyList();
+      return;
+    }
+    let html = before.length ? grp("before", "Still owed from before", before, "") : "";
+    if (S.scope === "received") html += grp("in", `Paid in ${mName(mk)}`, got, "");
+    else {
+      if (waiting.length || !q) html += grp("wait", "Waiting on", waiting, `${ic("check")} ${S.scope === "month" ? `All in for ${mName(mk)}.` : "Nobody owes you anything."}`);
+      if (got.length || !q) html += grp("in", "In", got, S.scope === "month" ? `Nothing in for ${mName(mk)} yet.` : "Nothing in yet.");
+    }
+    if (waiting.length || before.length) html += `<p class="tip">Tap the tick when it lands · swipe right to chase</p>`;
+    el.innerHTML = html;
   }
 
   function viewCalendar() {
@@ -1090,7 +1156,7 @@
       <div class="day-head"><h3>${fmtLong(S.calDay)}</h3><span class="num">${dayItems.length ? money(sum(dayItems)) : ""}</span></div>
       ${
         dayItems.length
-          ? `<div class="list">${dayItems.map((p) => prow(p)).join("")}</div>`
+          ? `<div class="glist">${dayItems.map((p) => mrow(p)).join("")}</div>`
           : `<div class="empty"><b>${S.calMode === "due" ? "Nothing due" : "Nothing received"} on this day</b>${
               S.data.clients.length ? `<button class="btn sm" data-action="add-payment" data-date="${S.calDay}">${ic("plus")} Add payment due this day</button>` : ""
             }</div>`
@@ -3556,10 +3622,23 @@
         return;
       }
       const t = e.target.closest(
-        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix],[data-lost],[data-unskip],[data-open-inc],[data-inc-recv],[data-open-src]"
+        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix],[data-lost],[data-unskip],[data-open-inc],[data-inc-recv],[data-open-src],[data-jump]"
       );
       if (!t || t.disabled) return;
       const d = t.dataset;
+      if (d.jump) {
+        // the In / Waiting on halves of the month card jump to that list
+        if (S.scope !== "month" || S.q || S.listMode !== "list") {
+          S.scope = "month";
+          S.q = "";
+          S.listMode = "list";
+          setPref("listMode", "list");
+          rerender();
+        }
+        const el = $(`#g-${d.jump}`);
+        if (el) el.scrollIntoView({ block: "start", behavior: reduced ? "auto" : "smooth" });
+        return;
+      }
       if (d.pay) {
         e.stopPropagation();
         haptic();
@@ -3645,9 +3724,6 @@
             const c = client(Number(d.client));
             return c && payAheadSheet(c);
           }
-          case "owed-more":
-            S.owedAll = !S.owedAll;
-            return rerender();
           case "needs":
             S.pendingNeeds = true;
             return openPendingNeeds();
@@ -3703,8 +3779,8 @@
         S.scope = d.scope;
         rerender();
         if (t.classList.contains("landed-line")) {
-          const el = $(".section-head");
-          if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+          const el = $("#payments");
+          if (el) el.scrollIntoView({ behavior: reduced ? "auto" : "smooth", block: "start" });
         }
         return;
       }

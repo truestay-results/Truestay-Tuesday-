@@ -25,8 +25,9 @@ Change a colour by changing its token, never by hard-coding a hex in a rule.
 | `--lime` / `--on-lime` | `#D7F54A` / `#1B1C19` | same | primary action, "received" |
 | `--red` | `#E9483C` | same | fills only: dots, coins, bars |
 | `--red-ink` | `#B42B20` | `#FF9187` | red **text** (passes contrast) |
-| `--amber` / `--amber-ink` | `#E89A1C` / `#8A5A08` | `#F5BD55` for text | due but not late |
-| `--green` / `--green-ink` | `#22A45D` / `#137140` | `#63D597` for text | paid |
+| `--amber` / `--amber-ink` | `#E89A1C` / `#8A5A08` | `#F5BD55` for text | waiting on: due but not late |
+| `--green` / `--green-ink` | `#22A45D` / `#137140` | `#63D597` for text | in: paid |
+| `--green-on-card` / `--amber-on-card` | `#63D597` / `#F5BD55` | same | the In and Waiting on figures on the dark month card |
 
 Rules that keep it readable:
 
@@ -34,6 +35,7 @@ Rules that keep it readable:
 - Red as a fill uses `--red`; red as text uses `--red-ink`. They are different colours on purpose.
 - White text on the green "paid" swipe uses `#178048` (4.98:1), not `--green`.
 - Status is never colour alone: overdue, unpaid and paid always come with a word or a tick as well.
+- Money has three colours and they mean the same everywhere (month card bar and halves, the lists, the month strip, the calendar): green is in, amber is still to come, red is late.
 
 ## Type
 
@@ -76,7 +78,7 @@ The inset only goes negative on an axis where the control is smaller than 44, so
 The full list of controls that use it is in the "v4: Apple HIG pass" block at the bottom of `app.css`.
 Calendar days use the horizontal-only version so neighbouring rows do not overlap.
 
-Two deliberate exceptions to "just make it 44 visible": the row tick (`.paybtn`) stays 40px visible with a 44px tap area, because 44 visible squeezed client names in a row, and the Owed card's Chase and Paid buttons are full 44px buttons with words, not icons.
+Two deliberate exceptions to "just make it 44 visible": the row tick (`.tick` on the Month lists, `.paybtn` elsewhere) stays 40px visible with a 44px tap area, because 44 visible squeezed client names in a row, and a late row's Chase button is a 32px pill with a word on it and a 44px tap area.
 
 ## Shape and space
 
