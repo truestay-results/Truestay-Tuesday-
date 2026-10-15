@@ -964,6 +964,7 @@
     const bits = [head];
     if (late && showDue) bits.push(`due ${fmtDay(p.due_date)}`);
     if (p.method === "dd") bits.push("Direct debit");
+    if (p.paid_date && p.receipt_at) bits.push("receipt sent");
     if (p.chase_count && !p.paid_date) bits.push(`chased ${p.chase_count > 1 ? p.chase_count + "× · last " : ""}${ago(p.chased_at)}`);
     const nm = esc(cname(p));
     const row = `<div class="prow mrow st-${st}" data-open-pay="${p.id}" role="button" tabindex="0">
@@ -1104,6 +1105,252 @@
     el.innerHTML = html;
   }
 
+  // ---------- sessions done this month ----------
+  // Sessions a month come from the plan's sessions a week: 4, 8 or 12 a calendar month for once, twice or three times a week.
+  const sessAll = () => S.data.sessions || [];
+  const sessionsIn = (cid, mk) =>
+    sessAll()
+      .filter((x) => x.client_id === cid && mKey(x.day) === mk)
+      .sort((a, b) => (a.day < b.day ? -1 : a.day > b.day ? 1 : a.id - b.id));
+  const perMonth = (plan) => (plan && plan.sessions_per_week > 0 ? Math.round(plan.sessions_per_week * 4) : null);
+  // who trains with you right now: PT or coaching, or any plan with sessions set
+  function trainsNow(c) {
+    if (!c || statusOf(c) === "finished") return false;
+    const cp = curPlan(c.id);
+    return !!cp && cp.kind !== "break" && (cp.kind === "pt" || cp.kind === "coaching" || perMonth(cp) > 0);
+  }
+  function sessState(cid, mk = mKey(londonToday())) {
+    const plan = curPlan(cid);
+    const done = sessionsIn(cid, mk);
+    const of = perMonth(plan);
+    return { plan, done, n: done.length, of, left: of == null ? null : of - done.length };
+  }
+  // "2 of 4 left", in the words you'd use
+  const sessWords = (st) =>
+    st.of == null
+      ? `${plural(st.n, "session")} this month`
+      : st.left > 0
+      ? `${st.left} of ${st.of} left`
+      : st.left === 0
+      ? `All ${st.of} done this month`
+      : `${-st.left} extra this month`;
+  function sessCard(c) {
+    const st = sessState(c.id);
+    const mk = mKey(londonToday());
+    const plan = st.plan;
+    const fn = esc(firstName(c.name));
+    if (st.of == null)
+      return `<section class="sess rise" style="--i:2" id="sess">
+        <div class="sess-head"><div><h3>Sessions in ${mName(mk)}</h3><small>${st.n ? plural(st.n, "session") + " so far" : "None yet"}</small></div></div>
+        <p class="sess-ask">How many sessions a month does ${fn} get?</p>
+        <div class="sess-pick">${[4, 8, 12].map((n) => `<button class="opt" data-sess-set="${n}" data-plan="${plan.id}">${n}</button>`).join("")}<button class="opt" data-sess-set="other" data-plan="${plan.id}">Other</button></div>
+        <button class="btn lime" data-sess-add="${c.id}">${ic("check")} Session done</button>
+        ${sessDays(st)}
+        <button class="linkish" data-sess-other="${c.id}">Add one on another day</button>
+      </section>`;
+    const over = st.left < 0;
+    const dots = Array.from({ length: Math.max(st.of, st.n) }, (_, i) => `<i class="${i < st.n ? (i >= st.of ? "on extra" : "on") : ""}"></i>`).join("");
+    return `<section class="sess rise${over ? " over" : st.left === 0 ? " full" : ""}" style="--i:2" id="sess">
+      <div class="sess-head">
+        <div><h3>Sessions in ${mName(mk)}</h3><button class="linkish" data-sess-set="change" data-plan="${plan.id}">${st.of} a month · change</button></div>
+        <div class="sess-left">${over ? `<b class="num">${-st.left}</b> extra` : `<b class="num">${st.left}</b> of ${st.of} left`}</div>
+      </div>
+      <div class="sess-dots" role="img" aria-label="${st.n} of ${st.of} sessions done">${dots}</div>
+      <button class="btn lime" data-sess-add="${c.id}">${ic("check")} Session done</button>
+      ${sessDays(st)}
+      <button class="linkish" data-sess-other="${c.id}">Add one on another day</button>
+    </section>`;
+  }
+  const sessDays = (st) =>
+    st.done.length
+      ? `<div class="sess-days">${st.done
+          .map((x) => `<button class="sess-day" data-sess-del="${x.id}" aria-label="Remove the session on ${fmtLong(x.day)}">${fmtShort(x.day)}${ic("x")}</button>`)
+          .join("")}</div>`
+      : "";
+  async function logSession(cid, day) {
+    const c = client(cid);
+    const d = day || londonToday();
+    try {
+      const r = await api("/sessions", { method: "POST", body: { client_id: cid, day: d } });
+      setData(r.data);
+      rerender();
+      haptic();
+      const st = sessState(cid, mKey(d));
+      toast(`${firstName(c?.name)} · ${mKey(d) === mKey(londonToday()) ? sessWords(st) : `session added for ${fmtShort(d)}`}`, [{ label: "Undo", fn: () => removeSession(r.id, true) }]);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function removeSession(id, quiet) {
+    const x = sessAll().find((y) => y.id === id);
+    try {
+      const r = await api(`/sessions/${id}`, { method: "DELETE" });
+      setData(r.data);
+      rerender();
+      if (!quiet && x) toast(`Removed the session on ${fmtShort(x.day)}`, [{ label: "Undo", fn: () => logSession(x.client_id, x.day) }]);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  async function setPerMonth(planId, n) {
+    try {
+      const r = await api(`/plans/${planId}/sessions`, { method: "POST", body: { per_month: n } });
+      setData(r.data);
+      closeSheet();
+      rerender();
+      toast(`${n} sessions a month`);
+    } catch (e) {
+      fail(e);
+    }
+  }
+  function perMonthSheet(planId) {
+    const plan = planOf(planId);
+    const cur = perMonth(plan);
+    const preset = cur && [4, 8, 12].includes(cur) ? String(cur) : "";
+    openSheet(
+      "Sessions a month",
+      `<form class="form" id="pmForm">
+        <p class="hint">Once a week is 4 a calendar month, twice is 8, three times is 12, however many weeks the month has.</p>
+        ${opts("pm", { 4: "4", 8: "8", 12: "12" }, preset)}
+        <div class="field"><label for="pm-n">Or another number</label><input id="pm-n" type="number" inputmode="numeric" min="1" max="40" value="${cur && !preset ? cur : ""}" placeholder="e.g. 6"></div>
+        <button class="btn lime">Save</button>
+      </form>`,
+      (sh) => {
+        $('[data-name="pm"]', sh).addEventListener("change", () => ($("#pm-n", sh).value = ""));
+        $("#pm-n", sh).addEventListener("input", () => {
+          const g = $('[data-name="pm"]', sh);
+          g.dataset.value = "";
+          $$(".opt", g).forEach((x) => x.classList.remove("on"));
+        });
+        $("#pmForm", sh).onsubmit = (e) => {
+          e.preventDefault();
+          const n = Number($("#pm-n", sh).value) || Number(val(sh, "pm"));
+          if (!(n >= 1 && n <= 40)) return toast("Pick how many sessions a month, from 1 to 40.");
+          setPerMonth(planId, Math.round(n));
+        };
+      }
+    );
+  }
+  function sessDaySheet(cid) {
+    const c = client(cid);
+    const today = londonToday();
+    openSheet(
+      `Session with ${firstName(c?.name)}`,
+      `<form class="form" id="sdForm">
+        <div class="field"><label for="sd-day">Day of the session</label><input id="sd-day" type="date" value="${addDays(today, -1)}" max="${today}"></div>
+        <button class="btn lime">${ic("check")} Add session</button>
+      </form>`,
+      (sh) => {
+        $("#sdForm", sh).onsubmit = (e) => {
+          e.preventDefault();
+          const day = $("#sd-day", sh).value || today;
+          if (day > today) return toast("You can only add a session once it's happened.");
+          closeSheet();
+          logSession(cid, day);
+        };
+      }
+    );
+  }
+  // from the + button: tap who you've just trained
+  function sessPickSheet() {
+    const cs = S.data.clients.filter(trainsNow).sort((a, b) => a.name.localeCompare(b.name));
+    openSheet(
+      "Session done",
+      cs.length
+        ? `<p class="hint">Tap who you've just trained. It counts towards ${mName(mKey(londonToday()))}.</p>
+           <div class="sess-list">${cs
+             .map((c) => {
+               const st = sessState(c.id);
+               return `<button class="sess-row${st.left != null && st.left <= 0 ? " full" : ""}" data-sess-add="${c.id}">
+                 <span class="n">${esc(c.name)}<small>${esc(sessWords(st))}</small></span>
+                 <span class="go">${ic("check")}</span>
+               </button>`;
+             })
+             .join("")}</div>`
+        : `<div class="empty"><b>Nobody's on PT or coaching right now</b><span>Sessions count for clients on a PT or coaching plan.</span></div>`
+    );
+  }
+
+  // ---------- receipts ----------
+  const receiptNo = (p) => String(p.id).padStart(4, "0");
+  const fmtFull = (iso) => fmt(iso, { day: "numeric", month: "short", year: "numeric" });
+  // what the payment was for, in words a client understands
+  function receiptLines(p) {
+    const plan = p.plan_id ? planOf(p.plan_id) : null;
+    const what = plan ? planName(plan) : p.package === "programme" && p.programme_weeks ? `${p.programme_weeks}-week programme` : KIND[p.package] || "Training";
+    if (plan && plan.billing === "upfront" && plan.kind !== "programme" && plan.end_date && p.amount_pence === plan.price_pence) {
+      // paid ahead: the months it covers, and the discount against the monthly price they were on
+      const months = Math.max(1, Math.round((daysBetween(plan.start_date, plan.end_date) + 1) / 30.44));
+      const covers = `${plural(months, "month")} paid ahead, ${fmtFull(plan.start_date)} to ${fmtFull(plan.end_date)}`;
+      const before = planBefore(plan);
+      const full = before && before.billing === "monthly" && before.price_pence > 0 ? before.price_pence * months : 0;
+      if (full > p.amount_pence)
+        return [
+          { title: what, sub: `${covers}, at ${money(before.price_pence)} a month`, amount: full },
+          { title: "Paid ahead discount", amount: p.amount_pence - full },
+        ];
+      return [{ title: what, sub: covers, amount: p.amount_pence }];
+    }
+    if (plan && plan.billing === "split" && plan.instalments) {
+      const mine = S.data.payments.filter((x) => x.plan_id === plan.id).sort((a, b) => (a.due_date < b.due_date ? -1 : 1));
+      const i = mine.findIndex((x) => x.id === p.id) + 1;
+      return [{ title: what, sub: i ? `Payment ${i} of ${plan.instalments}` : "", amount: p.amount_pence }];
+    }
+    if (plan && plan.billing === "upfront") return [{ title: what, sub: `Paid upfront, starting ${fmtFull(plan.start_date)}`, amount: p.amount_pence }];
+    return [{ title: what, sub: `${plan && plan.billing === "monthly" ? "Monthly payment" : "Payment"} due ${fmtFull(p.due_date)}`, amount: p.amount_pence }];
+  }
+  function receiptFile(p) {
+    const bytes = window.TSReceipt.build({
+      no: receiptNo(p),
+      client: cname(p),
+      paidOn: p.paid_date,
+      lines: receiptLines(p),
+      total: p.amount_pence,
+      method: p.method === "dd" ? "Direct debit" : null,
+      trainer: S.session?.name || "",
+      business: "TrueStay Results",
+      phone: "07401 738819",
+      place: "Personal training at The Gym Group, Meanwood, Leeds",
+      site: "truestaytuesday.com/coaching",
+    });
+    const name = `TrueStay receipt ${receiptNo(p)} ${firstName(cname(p))}.pdf`.replace(/[\\/:*?"<>|]/g, "");
+    return new File([bytes], name, { type: "application/pdf" });
+  }
+  // make it and hand it to the share sheet (WhatsApp is in there); without one, it downloads
+  async function sendReceipt(p) {
+    let file;
+    try {
+      file = receiptFile(p);
+    } catch (e) {
+      return toast("Couldn't make the receipt. Try again.");
+    }
+    let shared = false;
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file] });
+        shared = true;
+      } catch (e) {
+        if (e && e.name === "AbortError") return; // closed the share sheet without sending
+      }
+    }
+    if (!shared) {
+      const url = URL.createObjectURL(file);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = file.name;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 4000);
+    }
+    try {
+      const r = await api(`/payments/${p.id}/receipt`, { method: "POST" });
+      setData(r.data);
+      rerender();
+    } catch (e) {}
+    toast(shared ? `Receipt for ${firstName(cname(p))} sent` : "Receipt saved. Attach it in WhatsApp");
+  }
+
   function viewCalendar() {
     const mk = S.calMonth;
     const today = londonToday();
@@ -1218,6 +1465,7 @@
           <div class="main">
             <div class="name"><span class="t">${esc(c.name)}</span>${c.tenure === "new" ? `<span class="tag new">New</span>` : ""}</div>
             <div class="meta">${esc(plan)}</div>
+            ${trainsNow(c) ? (() => { const st = sessState(c.id); return `<div class="meta sess-meta${st.left != null && st.left < 0 ? " over" : ""}">${esc(sessWords(st))}</div>`; })() : ""}
           </div>
           <div class="right">${right}</div>
           <span class="chev">${ic("right")}</span>
@@ -1269,6 +1517,7 @@
         </div>
       </section>
       ${dec ? decisionCard(dec, 1) : ""}
+      ${trainsNow(c) ? sessCard(c) : ""}
       <div class="quick rise" style="--i:2">
         <button class="btn lime" data-change-plan="${c.id}">${ic("swap")} Change plan</button>
         <button class="btn ghost" data-action="add-payment" data-client="${c.id}">${ic("plus")} Add payment</button>
@@ -2413,6 +2662,7 @@
       ${
         st === "paid"
           ? `<div class="action-list pay-acts">
+              ${act("receipt", "receipt", p.receipt_at ? "Send the receipt again" : "Send a receipt", p.receipt_at ? `Sent ${fmtShort(p.receipt_at)}` : "A PDF for them, to send on WhatsApp")}
               ${act("date", "cal", "Change the date it came in", "")}
               ${act("unpay", "undo", "Not paid after all", "Puts it back as owed")}
               ${act("edit", "edit", "Edit details", "Amount, due date, method, notes")}
@@ -2479,6 +2729,7 @@
           }
           return;
         }
+        if (k === "receipt") return sendReceipt(cur);
         if (k === "date") return paidDateSheet(cur.id);
         if (k === "chase") return chaseSheet([cur]);
         if (k === "skip") return skipSheet(cur);
@@ -3445,6 +3696,11 @@
     openSheet(
       "Add",
       `<div class="action-list">
+        ${
+          S.tab === "clients" && S.clientId && trainsNow(client(S.clientId))
+            ? `<button class="action" data-sess-add="${S.clientId}"><span class="ic">${ic("check")}</span><span><b>Session done with ${esc(firstName(client(S.clientId)?.name))}</b><small>${esc(sessWords(sessState(S.clientId)))}</small></span></button>`
+            : `<button class="action" data-sess-pick="1"><span class="ic">${ic("check")}</span><span><b>Session done</b><small>Tick off a session for a client</small></span></button>`
+        }
         <button class="action" data-action="add-payment"${S.tab === "clients" && S.clientId ? ` data-client="${S.clientId}"` : ""}${
         S.tab === "calendar" && S.calDay ? ` data-date="${S.calDay}"` : ""
       }><span class="ic">${ic("receipt")}</span><span><b>Add payment</b><small>A one-off or extra</small></span></button>
@@ -3622,10 +3878,19 @@
         return;
       }
       const t = e.target.closest(
-        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix],[data-lost],[data-unskip],[data-open-inc],[data-inc-recv],[data-open-src],[data-jump]"
+        "[data-tab],[data-action],[data-month],[data-scope],[data-pay],[data-open-pay],[data-open-client],[data-day],[data-cal],[data-calmode],[data-listmode],[data-cstatus],[data-theme-set],[data-change-plan],[data-edit-plan],[data-resume],[data-finish],[data-dismiss],[data-chase],[data-chase-client],[data-trend],[data-mix],[data-lost],[data-unskip],[data-open-inc],[data-inc-recv],[data-open-src],[data-jump],[data-sess-add],[data-sess-del],[data-sess-other],[data-sess-set],[data-sess-pick]"
       );
       if (!t || t.disabled) return;
       const d = t.dataset;
+      // sessions done
+      if (d.sessAdd) {
+        if (t.closest(".sheet")) closeSheet();
+        return logSession(Number(d.sessAdd));
+      }
+      if (d.sessDel) return removeSession(Number(d.sessDel));
+      if (d.sessOther) return sessDaySheet(Number(d.sessOther));
+      if (d.sessPick) return sessPickSheet();
+      if (d.sessSet) return d.sessSet === "other" || d.sessSet === "change" ? perMonthSheet(Number(d.plan)) : setPerMonth(Number(d.plan), Number(d.sessSet));
       if (d.jump) {
         // the In / Waiting on halves of the month card jump to that list
         if (S.scope !== "month" || S.q || S.listMode !== "list") {

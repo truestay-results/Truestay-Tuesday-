@@ -315,16 +315,17 @@ async function getData(env) {
   await generate(db);
   await ensureIncomeSchema(db);
   await generateIncome(db);
-  const [c, p, pl, subs, sk, isrc, inc] = await db.batch([
+  const [c, p, pl, subs, sk, isrc, inc, ses] = await db.batch([
     db.prepare("SELECT id, name, phone, tenure, package, programme_weeks, price_pence, method, notes, finished_on, created_at FROM pay_clients ORDER BY name COLLATE NOCASE"),
     db.prepare(
-      "SELECT id, client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, chased_at, chase_count FROM pay_payments ORDER BY due_date, id"
+      "SELECT id, client_id, plan_id, auto, package, programme_weeks, amount_pence, due_date, method, paid_date, notes, chased_at, chase_count, receipt_at FROM pay_payments ORDER BY due_date, id"
     ),
     db.prepare("SELECT * FROM pay_plans ORDER BY client_id, start_date, id"),
     db.prepare("SELECT COUNT(*) AS n FROM pay_push_subs"),
     db.prepare("SELECT * FROM pay_skips ORDER BY due_date, id"),
     db.prepare("SELECT * FROM pay_income_sources ORDER BY name COLLATE NOCASE"),
     db.prepare("SELECT * FROM pay_income ORDER BY due_date, id"),
+    db.prepare("SELECT id, client_id, day FROM pay_sessions_done WHERE day >= ? ORDER BY day, id").bind(addDays(londonToday(), -400)),
   ]);
   return {
     today: londonToday(),
@@ -335,6 +336,7 @@ async function getData(env) {
     skips: sk.results,
     incomeSources: isrc.results,
     income: inc.results,
+    sessions: ses.results,
     settings: await getSettings(db),
     pushDevices: subs.results[0].n,
   };
@@ -794,6 +796,7 @@ export async function handlePay(req, env, url, ctx) {
         await db.batch([
           db.prepare("DELETE FROM pay_plans WHERE client_id = ?").bind(id),
           db.prepare("DELETE FROM pay_skips WHERE client_id = ?").bind(id),
+          db.prepare("DELETE FROM pay_sessions_done WHERE client_id = ?").bind(id),
           db.prepare("DELETE FROM pay_clients WHERE id = ?").bind(id),
         ]);
         return json({ ok: true, data: await getData(env) });
@@ -801,9 +804,24 @@ export async function handlePay(req, env, url, ctx) {
     }
 
     // ----- plans -----
-    if ((m = path.match(/^\/plans\/(\d+)(\/decided)?$/))) {
+    if ((m = path.match(/^\/plans\/(\d+)(\/decided|\/sessions)?$/))) {
       const id = idFrom(m[1]);
-      if (m[2] && method === "POST") {
+      if (m[2] === "/sessions" && method === "POST") {
+        // sessions a calendar month (4, 8 or 12 for once, twice or three times a week), kept as sessions a week like the plan form
+        const n = Math.round(Number((await readBody(req)).per_month));
+        if (!(n >= 1 && n <= 40)) bad("Pick how many sessions a month, from 1 to 40.");
+        const plan = await db.prepare("SELECT id, session_minutes FROM pay_plans WHERE id = ?").bind(id).first();
+        if (!plan) bad("Plan not found");
+        const spw = n / 4;
+        const mins = plan.session_minutes || 60;
+        const hours = Math.round(((spw * mins * 52) / 12 / 60) * 10) / 10;
+        await db
+          .prepare("UPDATE pay_plans SET sessions_per_week = ?, session_minutes = ?, hours_per_month = ?, updated_at = ? WHERE id = ?")
+          .bind(spw, mins, hours, now, id)
+          .run();
+        return json({ ok: true, data: await getData(env) });
+      }
+      if (m[2] === "/decided" && method === "POST") {
         await db.prepare("UPDATE pay_plans SET decided = 1, updated_at = ? WHERE id = ?").bind(now, id).run();
         return json({ ok: true, data: await getData(env) });
       }
@@ -830,7 +848,7 @@ export async function handlePay(req, env, url, ctx) {
         .run();
       return json({ ok: true, data: await getData(env) });
     }
-    if ((m = path.match(/^\/payments\/(\d+)(\/paid|\/chase|\/skip)?$/))) {
+    if ((m = path.match(/^\/payments\/(\d+)(\/paid|\/chase|\/skip|\/receipt)?$/))) {
       const id = idFrom(m[1]);
       const existing = await db.prepare("SELECT * FROM pay_payments WHERE id = ?").bind(id).first();
       if (!existing) bad("Payment not found");
@@ -838,7 +856,16 @@ export async function handlePay(req, env, url, ctx) {
         const b = await readBody(req);
         const paid = b.paid_date === null ? null : b.paid_date || today;
         if (paid !== null && !isDate(paid)) bad("Paid date isn't valid");
-        await db.prepare("UPDATE pay_payments SET paid_date = ?, updated_at = ? WHERE id = ?").bind(paid, now, id).run();
+        // not paid after all: a receipt sent for it no longer stands
+        await db
+          .prepare(`UPDATE pay_payments SET paid_date = ?, ${paid === null ? "receipt_at = NULL, " : ""}updated_at = ? WHERE id = ?`)
+          .bind(paid, now, id)
+          .run();
+        return json({ ok: true, data: await getData(env) });
+      }
+      if (m[2] === "/receipt" && method === "POST") {
+        if (!existing.paid_date) bad("This payment isn't paid yet, so there's no receipt to send.");
+        await db.prepare("UPDATE pay_payments SET receipt_at = ?, updated_at = ? WHERE id = ?").bind(today, now, id).run();
         return json({ ok: true, data: await getData(env) });
       }
       if (m[2] === "/skip" && method === "POST") {
@@ -892,6 +919,22 @@ export async function handlePay(req, env, url, ctx) {
       await ensureIncomeSchema(db);
       const r = await handleIncome(db, path, method, () => readBody(req), async () => json({ ok: true, data: await getData(env) }));
       if (r) return r;
+    }
+
+    // ----- sessions done -----
+    if (path === "/sessions" && method === "POST") {
+      const b = await readBody(req);
+      const cid = idFrom(String(b.client_id ?? ""));
+      await requireClient(db, cid);
+      const day = b.day || today;
+      if (!isDate(day)) bad("That date isn't valid");
+      if (day > today) bad("You can only log a session once it's happened.");
+      const r = await db.prepare("INSERT INTO pay_sessions_done (client_id, day, created_at) VALUES (?, ?, ?) RETURNING id").bind(cid, day, now).first();
+      return json({ ok: true, id: r.id, data: await getData(env) });
+    }
+    if ((m = path.match(/^\/sessions\/(\d+)$/)) && method === "DELETE") {
+      await db.prepare("DELETE FROM pay_sessions_done WHERE id = ?").bind(idFrom(m[1])).run();
+      return json({ ok: true, data: await getData(env) });
     }
 
     // ----- skipped payments: undo puts the payment back exactly as it was -----

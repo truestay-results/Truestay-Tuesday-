@@ -62,6 +62,15 @@ export async function ensureSchema(db) {
       db.prepare("CREATE INDEX IF NOT EXISTS pay_skips_plan_due ON pay_skips(plan_id, due_date)")
     );
   }
+  // sessions done, for "2 of 4 left this month" (pay_sessions is the sign-in table, so this one has its own name)
+  if (!tables.has("pay_sessions_done")) {
+    stmts.push(
+      db.prepare(`CREATE TABLE pay_sessions_done (
+        id INTEGER PRIMARY KEY, client_id INTEGER NOT NULL, day TEXT NOT NULL, created_at INTEGER NOT NULL
+      )`),
+      db.prepare("CREATE INDEX IF NOT EXISTS pay_sessions_done_client ON pay_sessions_done(client_id, day)")
+    );
+  }
   if (!tables.has("pay_push_subs")) {
     stmts.push(
       db.prepare(`CREATE TABLE pay_push_subs (
@@ -75,6 +84,7 @@ export async function ensureSchema(db) {
   if (!pc.has("auto")) stmts.push(db.prepare("ALTER TABLE pay_payments ADD COLUMN auto INTEGER NOT NULL DEFAULT 0"));
   if (!pc.has("chased_at")) stmts.push(db.prepare("ALTER TABLE pay_payments ADD COLUMN chased_at TEXT"));
   if (!pc.has("chase_count")) stmts.push(db.prepare("ALTER TABLE pay_payments ADD COLUMN chase_count INTEGER NOT NULL DEFAULT 0"));
+  if (!pc.has("receipt_at")) stmts.push(db.prepare("ALTER TABLE pay_payments ADD COLUMN receipt_at TEXT"));
   const cc = await cols("pay_clients");
   if (!cc.has("phone")) stmts.push(db.prepare("ALTER TABLE pay_clients ADD COLUMN phone TEXT NOT NULL DEFAULT ''"));
   if (!cc.has("finished_on")) stmts.push(db.prepare("ALTER TABLE pay_clients ADD COLUMN finished_on TEXT"));

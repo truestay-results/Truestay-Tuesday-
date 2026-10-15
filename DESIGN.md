@@ -116,6 +116,7 @@ Check on a phone-sized screen (390px, and 360px for the narrow case), light and 
 ## PDFs (TrueStay Logs)
 
 A client might see these, so they use the TrueStay Results brand rather than the app's lime.
+Receipts from Pay (`public/pay/receipt.js`) follow the same rules, on A5, with the number, who paid, when, what it was for and the total.
 
 - Charcoal `#1A1A1A` header band and text, off-white `#F2EDE4` on charcoal, secondary text `#5E5E5E` (6.5:1 on white)
 - Burnt orange `#C45A1E` for marks only (bars, the accent rule). It's 4.35:1 on white, so never small text
