@@ -1302,28 +1302,111 @@
     if (plan && plan.billing === "upfront") return [{ title: what, sub: `Paid upfront, starting ${fmtFull(plan.start_date)}`, amount: p.amount_pence }];
     return [{ title: what, sub: `${plan && plan.billing === "monthly" ? "Monthly payment" : "Payment"} due ${fmtFull(p.due_date)}`, amount: p.amount_pence }];
   }
-  function receiptFile(p) {
-    const bytes = window.TSReceipt.build({
-      no: receiptNo(p),
-      client: cname(p),
-      paidOn: p.paid_date,
-      lines: receiptLines(p),
-      total: p.amount_pence,
-      method: p.method === "dd" ? "Direct debit" : null,
-      trainer: S.session?.name || "",
-      business: "TrueStay Results",
-      phone: "07401 738819",
-      place: "Personal training at The Gym Group, Meanwood, Leeds",
-      site: "truestaytuesday.com/coaching",
-    });
-    const name = `TrueStay receipt ${receiptNo(p)} ${firstName(cname(p))}.pdf`.replace(/[\\/:*?"<>|]/g, "");
-    return new File([bytes], name, { type: "application/pdf" });
+  const receiptOpts = (p) => ({
+    no: receiptNo(p),
+    client: cname(p),
+    paidOn: p.paid_date,
+    lines: receiptLines(p),
+    total: p.amount_pence,
+    method: p.method === "dd" ? "Direct debit" : null,
+    trainer: S.session?.name || "",
+    business: "TrueStay Results",
+    phone: "07401 738819",
+    place: "Personal training at The Gym Group, Meanwood, Leeds",
+    site: "truestaytuesday.com/coaching",
+  });
+  const receiptName = (p, ext) => `TrueStay receipt ${receiptNo(p)} ${firstName(cname(p))}.${ext}`.replace(/[\\/:*?"<>|]/g, "");
+  function saveFile(file) {
+    const url = URL.createObjectURL(file);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = file.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 4000);
   }
-  // make it and hand it to the share sheet (WhatsApp is in there); without one, it downloads
-  async function sendReceipt(p) {
+  // remember it went, then say so
+  async function receiptGone(p, msg, actions = []) {
+    try {
+      const r = await api(`/payments/${p.id}/receipt`, { method: "POST" });
+      setData(r.data);
+      rerender();
+    } catch (e) {}
+    toast(msg, actions);
+  }
+  // The receipt goes as a picture: it lands in the chat like a photo, and Copy then Paste works in WhatsApp,
+  // which it doesn't with a PDF. The PDF is still there for anyone who wants a proper document.
+  function receiptSheet(p) {
+    const fn = firstName(cname(p));
+    const phone = (client(p.client_id)?.phone || "").trim();
+    const canCopy = !!(navigator.clipboard && navigator.clipboard.write && window.ClipboardItem);
+    openSheet(
+      `Receipt for ${fn}`,
+      `<div class="rcpt">
+        <div class="rcpt-frame"><img id="rcptImg" alt="Receipt ${receiptNo(p)} for ${esc(cname(p))}, ${money(p.amount_pence)}, paid ${fmtFull(p.paid_date)}"></div>
+        <div class="rcpt-acts">
+          <button class="btn lime" type="button" data-r="share" hidden>${ic("share")} Send</button>
+          <button class="btn ${canCopy ? "ghost" : "lime"}" type="button" data-r="copy" ${canCopy ? "" : "hidden"}>${ic("copy")} Copy</button>
+          <button class="btn lime" type="button" data-r="save" hidden>${ic("download")} Save picture</button>
+        </div>
+        <p class="hint center" id="rcptHow">${canCopy ? `Copy, then in ${esc(fn)}'s WhatsApp chat press and hold the message box and tap Paste.` : ""}</p>
+        <button class="linkish center" type="button" data-r="pdf">Send it as a PDF instead</button>
+      </div>`,
+      (sh) => {
+        let file = null;
+        const ready = window.TSReceipt.png(receiptOpts(p), 3).then((blob) => {
+          file = new File([blob], receiptName(p, "png"), { type: "image/png" });
+          $("#rcptImg", sh).src = URL.createObjectURL(blob);
+          const share = !!(navigator.canShare && navigator.canShare({ files: [file] }));
+          $('[data-r="share"]', sh).hidden = !share;
+          $('[data-r="save"]', sh).hidden = share || canCopy;
+          if (share) $("#rcptHow", sh).textContent = `Send opens your share list: tap WhatsApp, then ${fn}.${canCopy ? ` Or tap Copy, then in ${fn}'s chat press and hold the message box and tap Paste.` : ""}`;
+          return blob;
+        });
+        ready.catch(() => toast("Couldn't make the receipt. Try again."));
+        sh.addEventListener("click", async (e) => {
+          const b = e.target.closest("[data-r]");
+          if (!b) return;
+          const k = b.dataset.r;
+          if (k === "pdf") return sendReceiptPdf(p);
+          if (k === "copy") {
+            // straight away, inside the tap, so iPhone allows it; the picture can still be finishing
+            try {
+              await navigator.clipboard.write([new ClipboardItem({ "image/png": ready })]);
+            } catch (err) {
+              return toast(file && navigator.canShare && navigator.canShare({ files: [file] }) ? "Couldn't copy it here. Use Send instead." : "Couldn't copy it here. Try Send it as a PDF.");
+            }
+            closeSheet();
+            return receiptGone(p, `Copied. Paste it in ${fn}'s WhatsApp chat`, [
+              { label: "Open WhatsApp", fn: () => (window.location.href = phone ? `https://wa.me/${waNumber(phone)}` : "whatsapp://") },
+            ]);
+          }
+          if (!file) return toast("One second, still making it");
+          if (k === "share") {
+            try {
+              await navigator.share({ files: [file] });
+            } catch (err) {
+              if (err && err.name === "AbortError") return; // closed the share list without sending
+              return toast(canCopy ? "Couldn't open your share list. Try Copy instead." : "Couldn't open your share list.");
+            }
+            closeSheet();
+            return receiptGone(p, `Receipt for ${fn} sent`);
+          }
+          if (k === "save") {
+            saveFile(file);
+            closeSheet();
+            return receiptGone(p, "Saved. Attach it in WhatsApp");
+          }
+        });
+      }
+    );
+  }
+  // the PDF: share list if there is one, otherwise it downloads
+  async function sendReceiptPdf(p) {
     let file;
     try {
-      file = receiptFile(p);
+      file = new File([window.TSReceipt.build(receiptOpts(p))], receiptName(p, "pdf"), { type: "application/pdf" });
     } catch (e) {
       return toast("Couldn't make the receipt. Try again.");
     }
@@ -1333,25 +1416,12 @@
         await navigator.share({ files: [file] });
         shared = true;
       } catch (e) {
-        if (e && e.name === "AbortError") return; // closed the share sheet without sending
+        if (e && e.name === "AbortError") return;
       }
     }
-    if (!shared) {
-      const url = URL.createObjectURL(file);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = file.name;
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 4000);
-    }
-    try {
-      const r = await api(`/payments/${p.id}/receipt`, { method: "POST" });
-      setData(r.data);
-      rerender();
-    } catch (e) {}
-    toast(shared ? `Receipt for ${firstName(cname(p))} sent` : "Receipt saved. Attach it in WhatsApp");
+    if (!shared) saveFile(file);
+    closeSheet();
+    receiptGone(p, shared ? `Receipt for ${firstName(cname(p))} sent` : "Receipt saved. Attach it in WhatsApp");
   }
 
   function viewCalendar() {
@@ -2665,7 +2735,7 @@
       ${
         st === "paid"
           ? `<div class="action-list pay-acts">
-              ${act("receipt", "receipt", p.receipt_at ? "Send the receipt again" : "Send a receipt", p.receipt_at ? `Sent ${fmtShort(p.receipt_at)}` : "A PDF for them, to send on WhatsApp")}
+              ${act("receipt", "receipt", p.receipt_at ? "Send the receipt again" : "Send a receipt", p.receipt_at ? `Sent ${fmtShort(p.receipt_at)}` : "A picture of it to send or paste in WhatsApp")}
               ${act("date", "cal", "Change the date it came in", "")}
               ${act("unpay", "undo", "Not paid after all", "Puts it back as owed")}
               ${act("edit", "edit", "Edit details", "Amount, due date, method, notes")}
@@ -2732,7 +2802,7 @@
           }
           return;
         }
-        if (k === "receipt") return sendReceipt(cur);
+        if (k === "receipt") return receiptSheet(cur);
         if (k === "date") return paidDateSheet(cur.id);
         if (k === "chase") return chaseSheet([cur]);
         if (k === "skip") return skipSheet(cur);

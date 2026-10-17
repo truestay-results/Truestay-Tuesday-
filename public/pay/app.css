@@ -1209,3 +1209,12 @@ button.tile:disabled:active { transform: none; }
 .sess-row .go svg { width: 18px; height: 18px; }
 .crow .sess-meta { color: var(--ink-2); font-weight: 500; }
 .crow .sess-meta.over { color: var(--red-ink); }
+
+/* receipt: a picture to send or paste in WhatsApp, the PDF underneath */
+.rcpt { display: grid; gap: 12px; }
+.rcpt-frame { justify-self: center; width: min(100%, 340px); min-height: 220px; border-radius: 14px; overflow: hidden; background: #fff; box-shadow: 0 0 0 1px var(--line), 0 10px 30px var(--shadow); }
+.rcpt-frame img { display: block; width: 100%; height: auto; }
+.rcpt-acts { display: flex; gap: 10px; }
+.rcpt-acts .btn { flex: 1 1 0; }
+.rcpt .hint.center { margin-top: -2px; }
+.rcpt .linkish.center { justify-self: center; }

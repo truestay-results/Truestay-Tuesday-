@@ -1,7 +1,7 @@
 /* TrueStay Pay: a receipt for a paid payment, made on the phone as a one page PDF (A5).
    A client sees this, so it wears the TrueStay Results brand (charcoal, off-white, burnt orange) like the Logs PDFs,
    not the app's lime. A tiny PDF writer with Helvetica, so there's no library to load.
-   window.TSReceipt.build(opts) -> Uint8Array (see the opts note on build below). */
+   window.TSReceipt.build(opts) -> PDF bytes; .png(opts) -> a picture of the same receipt (see the opts note on draw below). */
 (() => {
   "use strict";
 
@@ -177,8 +177,9 @@
   //   trainer: "Shan", business: "TrueStay Results", phone: "07401 738819",
   //   place: "Personal training at The Gym Group, Meanwood, Leeds", site: "truestaytuesday.com/coaching"
   // }
-  function build(o) {
-    const pg = new Page();
+  // the receipt drawn onto any page that has rect, rrect, line and text; returns how far down it went
+  // fit: the picture version, where the footer follows the thanks instead of sitting at the foot of an A5 page
+  function draw(o, pg, fit) {
     const W = PW - 2 * M;
 
     // header band
@@ -244,11 +245,17 @@
     pg.text(`Any questions about this, message me on ${o.phone}.`, M, y + 16, { size: 9.5, color: INK2 });
 
     // footer
-    const fy = PH - 64;
+    const fy = fit ? y + 50 : PH - 64;
     pg.line(M, fy, PW - M, fy, RULE, 0.8);
     pg.text(`${o.trainer ? o.trainer + " · " : ""}${o.business} · ${o.phone}`, M, fy + 20, { size: 9, bold: true });
-    wrap(`${o.place} · ${o.site}`, false, 8.5, W).forEach((l, i) => pg.text(l, M, fy + 34 + i * 11, { size: 8.5, color: INK2 }));
+    const foot = wrap(`${o.place} · ${o.site}`, false, 8.5, W);
+    foot.forEach((l, i) => pg.text(l, M, fy + 34 + i * 11, { size: 8.5, color: INK2 }));
+    return fy + 34 + (foot.length - 1) * 11 + 28;
+  }
 
+  function build(o) {
+    const pg = new Page();
+    draw(o, pg, false);
     const now = new Date();
     const stamp = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, "0")}${String(now.getUTCDate()).padStart(2, "0")}${String(now.getUTCHours()).padStart(2, "0")}${String(
       now.getUTCMinutes()
@@ -256,5 +263,88 @@
     return pdf(pg, { title: `Receipt ${o.no} · ${o.client}`, author: o.business, date: stamp });
   }
 
-  window.TSReceipt = { build };
+  // ---------- the same receipt as a picture ----------
+  // A picture lands in a WhatsApp chat like a photo, and copies and pastes into a chat properly, which a PDF doesn't.
+  class NullPage {
+    rect() {}
+    rrect() {}
+    line() {}
+    text() {}
+  }
+  class CanvasPage {
+    constructor(scale, h) {
+      this.c = document.createElement("canvas");
+      this.c.width = Math.round(PW * scale);
+      this.c.height = Math.round(h * scale);
+      const g = (this.g = this.c.getContext("2d"));
+      g.scale(scale, scale);
+      g.fillStyle = "#FFFFFF";
+      g.fillRect(0, 0, PW, h);
+      g.textBaseline = "alphabetic";
+    }
+    font(size, bold) {
+      this.g.font = `${bold ? 700 : 400} ${size}px Helvetica, "Helvetica Neue", Arial, sans-serif`;
+    }
+    rect(x, y, w, h, fill) {
+      this.g.fillStyle = fill;
+      this.g.fillRect(x, y, w, h);
+    }
+    rrect(x, y, w, h, r, fill) {
+      const g = this.g;
+      r = Math.max(0, Math.min(r, w / 2, h / 2));
+      g.fillStyle = fill;
+      g.beginPath();
+      g.moveTo(x + r, y);
+      g.lineTo(x + w - r, y);
+      g.quadraticCurveTo(x + w, y, x + w, y + r);
+      g.lineTo(x + w, y + h - r);
+      g.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      g.lineTo(x + r, y + h);
+      g.quadraticCurveTo(x, y + h, x, y + h - r);
+      g.lineTo(x, y + r);
+      g.quadraticCurveTo(x, y, x + r, y);
+      g.closePath();
+      g.fill();
+    }
+    line(x1, y1, x2, y2, color, lw) {
+      const g = this.g;
+      g.strokeStyle = color;
+      g.lineWidth = lw;
+      g.beginPath();
+      g.moveTo(x1, y1);
+      g.lineTo(x2, y2);
+      g.stroke();
+    }
+    text(s, x, y, { size = 10, bold = false, color = INK, align = "left", cs = 0 } = {}) {
+      const g = this.g;
+      const t = String(s ?? "");
+      this.font(size, bold);
+      g.fillStyle = color;
+      if (!cs) {
+        g.textAlign = align;
+        g.fillText(t, x, y);
+        return g.measureText(t).width;
+      }
+      // letter spacing, a character at a time (not every phone has canvas letterSpacing)
+      const chars = [...t];
+      const w = chars.reduce((a, ch) => a + g.measureText(ch).width + cs, 0) - cs;
+      let cx = align === "right" ? x - w : align === "center" ? x - w / 2 : x;
+      g.textAlign = "left";
+      for (const ch of chars) {
+        g.fillText(ch, cx, y);
+        cx += g.measureText(ch).width + cs;
+      }
+      return w;
+    }
+  }
+  function canvas(o, scale = 3) {
+    const h = Math.ceil(draw(o, new NullPage(), true));
+    const pg = new CanvasPage(scale, h);
+    draw(o, pg, true);
+    return pg.c;
+  }
+  const png = (o, scale = 3) =>
+    new Promise((res, rej) => canvas(o, scale).toBlob((b) => (b ? res(b) : rej(new Error("Couldn't draw the receipt"))), "image/png"));
+
+  window.TSReceipt = { build, pdf: build, canvas, png };
 })();

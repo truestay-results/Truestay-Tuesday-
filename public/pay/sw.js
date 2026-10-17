@@ -1,8 +1,8 @@
 // TrueStay Pay service worker
 //  - keeps the app shell available for a fast, app-like start (network first, cached copy if offline; never touches /api)
 //  - shows the morning nudge and keeps the app-icon badge up to date
-const CACHE = "ts-pay-v12";
-const SHELL = ["./", "app.css?v=12", "app.js?v=12", "receipt.js?v=1", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png"];
+const CACHE = "ts-pay-v13";
+const SHELL = ["./", "app.css?v=13", "app.js?v=13", "receipt.js?v=2", "manifest.webmanifest", "icons/apple-touch-icon.png", "icons/icon-192.png"];
 
 self.addEventListener("install", (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
